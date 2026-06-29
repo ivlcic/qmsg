@@ -1,0 +1,7 @@
+com/example/batch/b/BatchBData.class
+com/example/batch/b/BatchBEmitResource.class
+com/example/batch/b/BatchBPublisher.class
+com/example/batch/b/BatchBService.class
+com/example/batch/b/BatchBControlResource.class
+com/example/batch/b/steps/BatchBDefaultStep.class
+com/example/batch/b/steps/BatchBArchiveStep.class

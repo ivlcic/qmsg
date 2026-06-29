@@ -1,0 +1,7 @@
+/home/nikola/tmp/qmsg/batch-a/src/main/java/com/example/batch/a/BatchAControlResource.java
+/home/nikola/tmp/qmsg/batch-a/src/main/java/com/example/batch/a/BatchAData.java
+/home/nikola/tmp/qmsg/batch-a/src/main/java/com/example/batch/a/BatchAEmitResource.java
+/home/nikola/tmp/qmsg/batch-a/src/main/java/com/example/batch/a/BatchAPublisher.java
+/home/nikola/tmp/qmsg/batch-a/src/main/java/com/example/batch/a/BatchAService.java
+/home/nikola/tmp/qmsg/batch-a/src/main/java/com/example/batch/a/steps/BatchACompleteStep.java
+/home/nikola/tmp/qmsg/batch-a/src/main/java/com/example/batch/a/steps/BatchAReadPayloadStep.java

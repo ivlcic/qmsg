@@ -1,0 +1,7 @@
+/home/nikola/tmp/qmsg/batch-b/src/main/java/com/example/batch/b/BatchBControlResource.java
+/home/nikola/tmp/qmsg/batch-b/src/main/java/com/example/batch/b/BatchBData.java
+/home/nikola/tmp/qmsg/batch-b/src/main/java/com/example/batch/b/BatchBEmitResource.java
+/home/nikola/tmp/qmsg/batch-b/src/main/java/com/example/batch/b/BatchBPublisher.java
+/home/nikola/tmp/qmsg/batch-b/src/main/java/com/example/batch/b/BatchBService.java
+/home/nikola/tmp/qmsg/batch-b/src/main/java/com/example/batch/b/steps/BatchBArchiveStep.java
+/home/nikola/tmp/qmsg/batch-b/src/main/java/com/example/batch/b/steps/BatchBDefaultStep.java

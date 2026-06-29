@@ -1,0 +1,12 @@
+/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/AbstractBatchControlResource.java
+/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/AbstractBatchService.java
+/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/AbstractRabbitBatchPublisher.java
+/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/ActionStepTypes.java
+/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/ActionSteps.java
+/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/BatchContext.java
+/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/BatchStatus.java
+/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/BatchStep.java
+/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/Message.java
+/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/MessageClientReceiver.java
+/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/StepTypes.java
+/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/Steps.java

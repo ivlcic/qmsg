@@ -1,0 +1,7 @@
+com/example/batch/a/steps/BatchAReadPayloadStep.class
+com/example/batch/a/steps/BatchACompleteStep.class
+com/example/batch/a/BatchAControlResource.class
+com/example/batch/a/BatchAService.class
+com/example/batch/a/BatchAData.class
+com/example/batch/a/BatchAEmitResource.class
+com/example/batch/a/BatchAPublisher.class

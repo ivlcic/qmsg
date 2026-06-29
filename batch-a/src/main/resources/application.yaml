@@ -1,0 +1,10 @@
+quarkus:
+  http:
+    port: 8080
+  application:
+    name: batch-a
+  rabbitmqclient:
+    hostname: localhost
+    port: 5672
+    username: guest
+    password: guest
