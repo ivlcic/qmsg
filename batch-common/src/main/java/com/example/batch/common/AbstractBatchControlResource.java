@@ -8,7 +8,7 @@ import jakarta.ws.rs.core.MediaType;
 
 @Produces(MediaType.APPLICATION_JSON)
 public abstract class AbstractBatchControlResource {
-  protected abstract AbstractBatchService service();
+  protected abstract BatchService service();
 
   @POST
   @Path("/start")

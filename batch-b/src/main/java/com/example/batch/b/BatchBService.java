@@ -1,6 +1,6 @@
 package com.example.batch.b;
 
-import static com.example.batch.common.Actions.onDefault;
+import static com.example.batch.common.BatchService.byDefault;
 
 import com.example.batch.b.steps.BatchBArchiveStep;
 import com.example.batch.b.steps.BatchBDefaultStep;
@@ -12,10 +12,10 @@ public class BatchBService extends AbstractBatchService {
 
   public BatchBService() {
     super(
-        onDefault(
+        byDefault(
             BatchBData.class,
             BatchBDefaultStep.class
-        ).then(
+        ).on(
             "archive", BatchBData.class, BatchBArchiveStep.class
         )
     );

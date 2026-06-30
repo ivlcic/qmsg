@@ -1,6 +1,6 @@
 package com.example.batch.a;
 
-import static com.example.batch.common.Actions.onDefault;
+import static com.example.batch.common.BatchService.byDefault;
 
 import com.example.batch.a.steps.BatchACompleteStep;
 import com.example.batch.a.steps.BatchAReadPayloadStep;
@@ -12,9 +12,10 @@ public class BatchAService extends AbstractBatchService {
 
     public BatchAService() {
         super(
-            onDefault(
+            byDefault(
                 BatchAData.class,
-                BatchAReadPayloadStep.class, BatchACompleteStep.class
+                BatchAReadPayloadStep.class,
+                BatchACompleteStep.class
             )
         );
     }

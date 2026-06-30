@@ -14,16 +14,14 @@ import org.jboss.logging.Logger;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-public abstract class AbstractBatchService {
+public abstract class AbstractBatchService implements BatchService {
   private static final Logger LOG = Logger.getLogger(AbstractBatchService.class);
-  static final String DEFAULT_ACTION = "<<default>>";
 
   @Inject
   MessageClientReceiver receiver;
 
   @Inject
   ObjectMapper objectMapper;
-
 
   @Inject @All
   @SuppressWarnings("CdiInjectionPointsInspection")
@@ -60,6 +58,7 @@ public abstract class AbstractBatchService {
     }
   }
 
+  @Override
   public String getName() {
     return getClass().getSimpleName();
   }
@@ -73,6 +72,7 @@ public abstract class AbstractBatchService {
     start();
   }
 
+  @Override
   public synchronized BatchStatus start() {
     if (consuming.get()) {
       return status();
@@ -127,6 +127,7 @@ public abstract class AbstractBatchService {
     receiver.close();
   }
 
+  @Override
   public synchronized BatchStatus stop() {
     if (!consuming.get()) {
       return status();
@@ -138,6 +139,7 @@ public abstract class AbstractBatchService {
     return status();
   }
 
+  @Override
   public BatchStatus status() {
     return new BatchStatus(queueName(), consuming.get(), consumerTag);
   }

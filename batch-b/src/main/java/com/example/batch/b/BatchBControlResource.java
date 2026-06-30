@@ -1,7 +1,7 @@
 package com.example.batch.b;
 
 import com.example.batch.common.AbstractBatchControlResource;
-import com.example.batch.common.AbstractBatchService;
+import com.example.batch.common.BatchService;
 
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Path;
@@ -12,7 +12,7 @@ public class BatchBControlResource extends AbstractBatchControlResource {
   BatchBService service;
 
   @Override
-  protected AbstractBatchService service() {
+  protected BatchService service() {
     return service;
   }
 }
