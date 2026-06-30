@@ -12,7 +12,6 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public abstract class AbstractBatchService {
@@ -31,11 +30,11 @@ public abstract class AbstractBatchService {
   List<BatchStep<?>> availableSteps;
 
   private final AtomicBoolean consuming = new AtomicBoolean(false);
-  private final ActionSteps steps;
+  private final Actions actions;
   private String consumerTag;
 
-  protected AbstractBatchService(ActionSteps steps) {
-    this.steps = steps;
+  protected AbstractBatchService(Actions actions) {
+    this.actions = actions;
   }
 
   private <S extends BatchStep<P>, P> S resolveStep(Class<S> type) {
@@ -50,13 +49,14 @@ public abstract class AbstractBatchService {
 
   @PostConstruct
   void initializeSteps() {
-    for (Map.Entry<String, Steps<?>> entry : steps.entrySet()) {
-      Steps<?> steps = entry.getValue();
+    for (Action<?> action : actions.values()) {
+      initializeAction(action);
+    }
+  }
 
-      for (Class<? extends BatchStep<?>> stepType : steps.types()) {
-        BatchStep<?> step = resolveStep(stepType);
-        steps.add(step);
-      }
+  private <P> void initializeAction(Action<P> action) {
+    for (Class<? extends BatchStep<P>> stepType : action.stepTypes()) {
+      action.addStep(resolveStep(stepType));
     }
   }
 
@@ -95,13 +95,13 @@ public abstract class AbstractBatchService {
       );
 
       String action = normalizeAction(message.getAction());
-      Steps<?> actionSteps = steps.get(action);
-      if (actionSteps == null || actionSteps.isEmpty()) {
+      Action<?> configuredAction = actions.get(action);
+      if (configuredAction == null || configuredAction.isEmpty()) {
         throw new RuntimeException(
             "No steps found for action [" + action + "] in [" + getName() + "] service!"
         );
       }
-      executeSteps(action, actionSteps, message.getPayload(), body);
+      executeAction(configuredAction, message.getPayload(), body);
       return true;
     } catch (Exception e) {
       LOG.errorf(e, "Failed to process message from queue %s", queueName());
@@ -109,16 +109,15 @@ public abstract class AbstractBatchService {
     }
   }
 
-  private <P> void executeSteps(
-      String action,
-      Steps<P> actionSteps,
+  private <P> void executeAction(
+      Action<P> action,
       JsonNode payload,
       byte[] body) throws Exception {
     P typedPayload = payload == null || payload.isNull()
         ? null
-        : objectMapper.treeToValue(payload, actionSteps.payloadType());
-    BatchContext<P> context = new BatchContext<>(action, typedPayload, body, null);
-    for (BatchStep<P> step : actionSteps) {
+        : objectMapper.treeToValue(payload, action.payloadType());
+    BatchContext<P> context = new BatchContext<>(action.name(), typedPayload, body, null);
+    for (BatchStep<P> step : action) {
       step.execute(context);
     }
   }
