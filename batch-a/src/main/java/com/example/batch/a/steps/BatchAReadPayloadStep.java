@@ -6,21 +6,11 @@ import com.example.batch.a.BatchAData;
 import com.example.batch.common.BatchContext;
 import com.example.batch.common.BatchStep;
 
-import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.context.Dependent;
 
-@ApplicationScoped
+@Dependent
 public class BatchAReadPayloadStep implements BatchStep<BatchAData> {
     private static final Logger LOG = Logger.getLogger(BatchAReadPayloadStep.class);
-
-    @Override
-    public String action() {
-        return "default";
-    }
-
-    @Override
-    public int order() {
-        return 10;
-    }
 
     @Override
     public void execute(BatchContext<BatchAData> context) {

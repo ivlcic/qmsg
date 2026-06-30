@@ -2,8 +2,10 @@ package com.example.batch.common;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.quarkus.arc.All;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
+import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -24,28 +26,36 @@ public abstract class AbstractBatchService<P> {
     @Inject
     ObjectMapper objectMapper;
 
+    @Inject
+    @All
+    List<BatchStep<?>> availableSteps;
+
     private final AtomicBoolean consuming = new AtomicBoolean(false);
-    private final ActionSteps<P> steps;
+    private final ActionSteps<P> steps = new ActionSteps<>();
     private String consumerTag;
 
 
-    private BatchStep<P> resolveStep(Class<? extends BatchStep<P>> type, List<BatchStep<P>> availableSteps) {
-        for (BatchStep<P> step : availableSteps) {
+    @SuppressWarnings("unchecked")
+    private BatchStep<P> resolveStep(Class<? extends BatchStep<P>> type) {
+        for (BatchStep<?> step : availableSteps) {
             if (type.isInstance(step)) {
-                return step;
+                return (BatchStep<P>) step;
             }
         }
         throw new IllegalStateException("No batch step bean found for " + type.getName());
     }
 
-    public AbstractBatchService(List<BatchStep<P>> availableSteps,
-                                ActionStepTypes<P> actionMap) {
-        this.steps = new ActionSteps<>();
+    protected abstract ActionStepTypes<P> actionStepTypes();
+
+    @PostConstruct
+    void initializeSteps() {
+        steps.clear();
+        ActionStepTypes<P> actionMap = actionStepTypes();
         for (Map.Entry<String, StepTypes<P>> entry : actionMap.entrySet()) {
             this.steps.put(
                 entry.getKey(),
                 new Steps<>(entry.getValue().stream()
-                    .map(type -> resolveStep(type, availableSteps))
+                    .map(this::resolveStep)
                     .collect(Collectors.toList()))
                 );
         }
