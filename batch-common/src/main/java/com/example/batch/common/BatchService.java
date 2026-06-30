@@ -1,27 +1,64 @@
 package com.example.batch.common;
 
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.List;
 
 public interface BatchService {
   String DEFAULT_ACTION = "<<default>>";
 
-  static <P> Actions byDefault(Class<P> payloadType, List<Class<? extends BatchStep<P>>> stepTypes) {
-    return new Actions().byDefault(payloadType, stepTypes);
+  class ActionBuilder<P> {
+    private final Class<P> payloadType;
+
+    ActionBuilder(Class<P> payloadType) {
+      if (payloadType == null) {
+        throw new IllegalArgumentException("Payload type is required");
+      }
+      this.payloadType = payloadType;
+    }
+
+    public ActionDefinition<P> execute(List<Class<? extends BatchStep<P>>> stepTypes) {
+      return new ActionDefinition<>(payloadType, stepTypes);
+    }
+
+    @SafeVarargs
+    public final ActionDefinition<P> execute(Class<? extends BatchStep<P>>... stepTypes) {
+      return execute(Arrays.asList(stepTypes));
+    }
   }
 
-  @SafeVarargs
-  static <P> Actions byDefault(Class<P> payloadType, Class<? extends BatchStep<P>>... stepTypes) {
-    return byDefault(payloadType, Arrays.asList(stepTypes));
+  class ActionDefinition<P> {
+    private final Class<P> payloadType;
+    private final List<Class<? extends BatchStep<P>>> stepTypes;
+
+    ActionDefinition(Class<P> payloadType, Collection<Class<? extends BatchStep<P>>> stepTypes) {
+      if (stepTypes == null || stepTypes.isEmpty()) {
+        throw new IllegalArgumentException("At least one step type is required");
+      }
+      this.payloadType = payloadType;
+      this.stepTypes = List.copyOf(stepTypes);
+    }
+
+    Class<P> payloadType() {
+      return payloadType;
+    }
+
+    List<Class<? extends BatchStep<P>>> stepTypes() {
+      return stepTypes;
+    }
   }
 
-  static <P> Actions on(String name, Class<P> payloadType, List<Class<? extends BatchStep<P>>> stepTypes) {
-    return new Actions().on(name, payloadType, stepTypes);
+  static <P> ActionBuilder<P> with(Class<P> payloadType) {
+    return new ActionBuilder<>(payloadType);
   }
 
-  @SafeVarargs
-  static <P> Actions on(String name, Class<P> payloadType, Class<? extends BatchStep<P>>... stepTypes) {
-    return on(name, payloadType, Arrays.asList(stepTypes));
+  static <P> Actions byDefault(ActionDefinition<P> definition) {
+    return new Actions().byDefault(definition);
+  }
+
+  @SuppressWarnings("unused")
+  static <P> Actions on(String name, ActionDefinition<P> definition) {
+    return new Actions().on(name, definition);
   }
 
   String getName();

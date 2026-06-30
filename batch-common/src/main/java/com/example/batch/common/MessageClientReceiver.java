@@ -17,11 +17,42 @@ public class MessageClientReceiver implements AutoCloseable {
   private static final Logger LOG = Logger.getLogger(MessageClientReceiver.class);
 
   @Inject
+  @SuppressWarnings("CdiInjectionPointsInspection")
   RabbitMQClient rabbitMQClient;
 
   private Connection connection;
   private Channel channel;
   private String queueName;
+
+  private boolean isOpenFor(String queueName) {
+    return isOpen() && queueName.equals(this.queueName);
+  }
+
+  private boolean isOpen() {
+    return channel != null && channel.isOpen() && connection != null && connection.isOpen();
+  }
+
+  private void ensureOpen() {
+    if (!isOpen()) {
+      throw new IllegalStateException("Receiver is not open");
+    }
+  }
+
+  private void handleDelivery(Delivery delivery, MessageHandler messageHandler) throws IOException {
+    long deliveryTag = delivery.getEnvelope().getDeliveryTag();
+    boolean ack = false;
+    try {
+      ack = messageHandler.handle(delivery.getBody());
+    } catch (Exception e) {
+      LOG.errorf(e, "Message handler failed for queue %s", queueName);
+    }
+
+    if (ack) {
+      channel.basicAck(deliveryTag, false);
+    } else {
+      channel.basicNack(deliveryTag, false, true);
+    }
+  }
 
   public synchronized void open(String queueName) {
     if (isOpenFor(queueName)) {
@@ -82,36 +113,6 @@ public class MessageClientReceiver implements AutoCloseable {
       channel = null;
       connection = null;
       queueName = null;
-    }
-  }
-
-  private void handleDelivery(Delivery delivery, MessageHandler messageHandler) throws IOException {
-    long deliveryTag = delivery.getEnvelope().getDeliveryTag();
-    boolean ack = false;
-    try {
-      ack = messageHandler.handle(delivery.getBody());
-    } catch (Exception e) {
-      LOG.errorf(e, "Message handler failed for queue %s", queueName);
-    }
-
-    if (ack) {
-      channel.basicAck(deliveryTag, false);
-    } else {
-      channel.basicNack(deliveryTag, false, true);
-    }
-  }
-
-  private boolean isOpenFor(String queueName) {
-    return isOpen() && queueName.equals(this.queueName);
-  }
-
-  private boolean isOpen() {
-    return channel != null && channel.isOpen() && connection != null && connection.isOpen();
-  }
-
-  private void ensureOpen() {
-    if (!isOpen()) {
-      throw new IllegalStateException("Receiver is not open");
     }
   }
 

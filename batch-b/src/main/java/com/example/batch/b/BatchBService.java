@@ -1,11 +1,12 @@
 package com.example.batch.b;
 
-import static com.example.batch.common.BatchService.byDefault;
-
 import com.example.batch.b.steps.BatchBArchiveStep;
 import com.example.batch.b.steps.BatchBDefaultStep;
 import com.example.batch.common.AbstractBatchService;
 import jakarta.enterprise.context.ApplicationScoped;
+
+import static com.example.batch.common.BatchService.byDefault;
+import static com.example.batch.common.BatchService.with;
 
 @ApplicationScoped
 public class BatchBService extends AbstractBatchService {
@@ -13,10 +14,12 @@ public class BatchBService extends AbstractBatchService {
   public BatchBService() {
     super(
         byDefault(
-            BatchBData.class,
-            BatchBDefaultStep.class
+            with(BatchBData.class)
+                .execute(BatchBDefaultStep.class)
         ).on(
-            "archive", BatchBData.class, BatchBArchiveStep.class
+            "archive",
+            with(BatchBData.class)
+                .execute(BatchBArchiveStep.class)
         )
     );
   }

@@ -5,23 +5,24 @@
 This repository contains a small Quarkus-based RabbitMQ batch framework plus two concrete batch applications:
 
 - `batch-common`: shared framework code
-- `batch-a`: sample batch app with a two-step default action
-- `batch-b`: sample batch app with a default action and an explicit `archive` action
+- `batch-a`: sample batch app with one default action made of two steps
+- `batch-b`: sample batch app with one default action and one explicit `archive` action
 
 The framework is message-driven. Each batch app:
 
 - consumes from one RabbitMQ queue
-- can start and stop consuming through JAX-RS endpoints
-- publishes messages to its own queue through a JAX-RS endpoint
-- deserializes JSON into a typed payload before step execution
-- runs a configured chain of injectable steps based on message action
+- can start and stop consuming through JAX-RS control endpoints
+- publishes messages to its own queue through a JAX-RS emit endpoint
+- routes messages by action name
+- deserializes each action payload into that action's configured payload type
+- executes an ordered list of CDI step instances for the resolved action
 
 ## Project Layout
 
-- [pom.xml](/home/nikola/tmp/qmsg/pom.xml): parent Maven reactor for all modules
-- [batch-common](/home/nikola/tmp/qmsg/batch-common): reusable batch framework
-- [batch-a](/home/nikola/tmp/qmsg/batch-a): first concrete batch service
-- [batch-b](/home/nikola/tmp/qmsg/batch-b): second concrete batch service
+- [pom.xml](pom.xml): parent Maven reactor
+- [batch-common](batch-common): reusable framework module
+- [batch-a](batch-a): sample Batch A application
+- [batch-b](batch-b): sample Batch B application
 
 ## Runtime Stack
 
@@ -32,9 +33,11 @@ The framework is message-driven. Each batch app:
 
 ## Core Framework
 
-### Shared message envelope
+### Message Envelope
 
-[Message.java](/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/Message.java)
+[Message.java](batch-common/src/main/java/com/example/batch/common/Message.java)
+
+Messages use a shared envelope:
 
 ```json
 {
@@ -47,49 +50,115 @@ The framework is message-driven. Each batch app:
 
 Behavior:
 
-- `action` may be omitted or blank
-- if `action` is missing or blank, the framework maps it to the internal default action key `<<default>>`
-- `payload` is deserialized into the batch service payload type before steps are invoked
+- `action` may be omitted or blank.
+- Missing or blank `action` maps to `BatchService.DEFAULT_ACTION`, currently `<<default>>`.
+- The envelope is first read as `Message<JsonNode>`.
+- After action resolution, `payload` is deserialized to the payload type declared for that action.
 
-### Batch service base class
+### Batch Service Contract
 
-[AbstractBatchService.java](/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/AbstractBatchService.java)
+[BatchService.java](batch-common/src/main/java/com/example/batch/common/BatchService.java)
+
+`BatchService` is the public service contract. It exposes:
+
+- `getName()`
+- `start()`
+- `stop()`
+- `status()`
+
+It also owns the action DSL static entry points:
+
+```java
+public class BatchBService extends AbstractBatchService {
+
+  public BatchBService() {
+    super(
+        byDefault(
+            with(BatchBData.class)
+                .execute(BatchBDefaultStep.class)
+        ).on(
+            "archive",
+            with(BatchBData.class)
+                .execute(BatchBArchiveStep.class)
+        )
+    );
+  }
+}
+```
+
+DSL structure:
+
+- `with(PayloadType.class)` creates a typed action builder.
+- `.execute(StepOne.class, StepTwo.class)` creates an unnamed action definition.
+- `byDefault(...)` creates an `Actions` registry with the default action.
+- `.on("name", ...)` adds another named action to the registry.
+
+`ActionBuilder` and `ActionDefinition` are nested classes inside `BatchService`, not standalone files.
+
+### Actions And Action
+
+[Actions.java](batch-common/src/main/java/com/example/batch/common/Actions.java)
+[Action.java](batch-common/src/main/java/com/example/batch/common/Action.java)
+
+`Actions` is the action registry. It is an instance-only fluent API:
+
+- `byDefault(ActionDefinition<P>)`
+- `on(String, ActionDefinition<P>)`
+
+`Action<P>` is the action container. It owns:
+
+- action name
+- payload type
+- configured step classes
+- resolved CDI step instances
+
+Step order is the order declared in `.execute(...)`. There is no `BatchStep.action()` and no `BatchStep.order()`.
+
+### Batch Service Base Class
+
+[AbstractBatchService.java](batch-common/src/main/java/com/example/batch/common/AbstractBatchService.java)
 
 Responsibilities:
 
-- opens the RabbitMQ queue on startup
-- starts consuming automatically on startup
-- exposes `start()`, `stop()`, and `status()`
-- resolves action-to-step-chain mapping from constructor input
-- deserializes the incoming message envelope
-- creates `BatchContext<P>` and executes the registered steps
+- stores the configured `Actions`
+- injects all available CDI `BatchStep<?>` beans using `@All`
+- resolves configured step classes to CDI step instances at `@PostConstruct`
+- opens the queue and starts consuming on Quarkus startup
+- exposes `start()`, `stop()`, and `status()` through the `BatchService` contract
+- normalizes missing or blank actions to `<<default>>`
+- deserializes payload per resolved action
+- creates `BatchContext<P>` and executes the action steps
 - returns `ack` on success
 - returns `nack` with requeue on failure
 
-Important implementation detail:
+Important current behavior:
 
-- step routing is driven by `ActionStepTypes`
-- `BatchStep.action()` is currently not used for dispatch
-- `BatchStep.order()` is currently not used for sorting
-- actual execution order is the registration order in `ActionStepTypes`
+- `AbstractBatchService` is intentionally not generic because one service may support actions with different payload types.
+- Payload typing belongs to each configured action, not to the whole service.
+- Step instances are resolved from CDI, not manually constructed.
 
-### Step chain registration
+### Batch Steps
 
-[ActionStepTypes.java](/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/ActionStepTypes.java)
+[BatchStep.java](batch-common/src/main/java/com/example/batch/common/BatchStep.java)
 
-This maps an action name to a list of step classes. The service constructor resolves those classes against injected CDI step beans.
-
-Pattern:
+Steps implement:
 
 ```java
-new ActionStepTypes<MyPayload>()
-    .onDefault(StepOne.class, StepTwo.class)
-    .on("archive", ArchiveStep.class);
+public interface BatchStep<P> {
+  void execute(BatchContext<P> context) throws Exception;
+}
 ```
 
-### Message receiver
+Conventions:
 
-[MessageClientReceiver.java](/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/MessageClientReceiver.java)
+- Concrete step beans should be `@Dependent`.
+- `@Dependent` keeps step instances scoped to the owning injection context instead of sharing a single application-wide step instance.
+- A single action chain must use one payload type across all of its steps.
+- Different actions in the same service may use different payload types.
+
+### Message Receiver
+
+[MessageClientReceiver.java](batch-common/src/main/java/com/example/batch/common/MessageClientReceiver.java)
 
 Responsibilities:
 
@@ -99,22 +168,24 @@ Responsibilities:
 - manages consumer registration and cancellation
 - performs `basicAck` or `basicNack(..., requeue=true)` based on handler result
 
-### Batch context
+### Batch Context
 
-[BatchContext.java](/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/BatchContext.java)
+[BatchContext.java](batch-common/src/main/java/com/example/batch/common/BatchContext.java)
 
-Carries:
+Carries per-message execution state:
 
-- resolved action
+- resolved action name
 - typed payload
 - raw message body
-- message properties
+- RabbitMQ message properties field
 - receive timestamp
-- per-message attribute map for step-to-step state sharing
+- per-message attributes map for sharing state between steps
 
-### Shared REST control resource
+Current note: `AbstractBatchService` currently passes `null` for RabbitMQ properties because the receiver handler contract only passes message body bytes.
 
-[AbstractBatchControlResource.java](/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/AbstractBatchControlResource.java)
+### Shared REST Control Resource
+
+[AbstractBatchControlResource.java](batch-common/src/main/java/com/example/batch/common/AbstractBatchControlResource.java)
 
 Exposes:
 
@@ -122,9 +193,11 @@ Exposes:
 - `POST /.../stop`
 - `GET /.../status`
 
-### Shared publisher
+The resource depends on the `BatchService` interface, not directly on `AbstractBatchService`.
 
-[AbstractRabbitBatchPublisher.java](/home/nikola/tmp/qmsg/batch-common/src/main/java/com/example/batch/common/AbstractRabbitBatchPublisher.java)
+### Shared Publisher
+
+[AbstractRabbitBatchPublisher.java](batch-common/src/main/java/com/example/batch/common/AbstractRabbitBatchPublisher.java)
 
 Responsibilities:
 
@@ -132,15 +205,21 @@ Responsibilities:
 - wraps payload into the shared `Message<P>` envelope
 - publishes durable JSON messages to the target queue
 
+Current behavior:
+
+- opens a RabbitMQ connection and channel per publish call
+- sets `contentType` to `application/json`
+- sets `deliveryMode(2)` for persistent messages
+
 ## Batch A
 
-### Module purpose
+### Purpose
 
-`batch-a` is the sample service with a default action composed of two steps.
+`batch-a` demonstrates a default action with two ordered steps.
 
 ### Payload
 
-[BatchAData.java](/home/nikola/tmp/qmsg/batch-a/src/main/java/com/example/batch/a/BatchAData.java)
+[BatchAData.java](batch-a/src/main/java/com/example/batch/a/BatchAData.java)
 
 ```json
 {
@@ -152,43 +231,62 @@ Responsibilities:
 
 ### Queue
 
-[BatchAPublisher.java](/home/nikola/tmp/qmsg/batch-a/src/main/java/com/example/batch/a/BatchAPublisher.java)
+[BatchAPublisher.java](batch-a/src/main/java/com/example/batch/a/BatchAPublisher.java)
 
 - queue name: `queue.BatchAService`
 
-### Action mapping
+### Action Mapping
 
-[BatchAService.java](/home/nikola/tmp/qmsg/batch-a/src/main/java/com/example/batch/a/BatchAService.java)
+[BatchAService.java](batch-a/src/main/java/com/example/batch/a/BatchAService.java)
 
-- default action `<<default>>`
-- steps:
-  - `BatchAReadPayloadStep`
-  - `BatchACompleteStep`
+```java
+public class BatchAService extends AbstractBatchService {
+
+  public BatchAService() {
+    super(
+        byDefault(
+            with(BatchAData.class)
+                .execute(
+                    BatchAReadPayloadStep.class,
+                    BatchACompleteStep.class
+                )
+        )
+    );
+  }
+}
+```
+
+Default action steps:
+
+- `BatchAReadPayloadStep`
+- `BatchACompleteStep`
 
 ### Steps
 
-[BatchAReadPayloadStep.java](/home/nikola/tmp/qmsg/batch-a/src/main/java/com/example/batch/a/steps/BatchAReadPayloadStep.java)
+[BatchAReadPayloadStep.java](batch-a/src/main/java/com/example/batch/a/steps/BatchAReadPayloadStep.java)
 
-- reads the typed payload
-- logs `id`, `name`, `amount`
-- stores `payloadId` into the batch context
+- `@Dependent`
+- reads the typed `BatchAData` payload
+- logs `id`, `name`, and `amount`
+- stores `payloadId` in the context
 
-[BatchACompleteStep.java](/home/nikola/tmp/qmsg/batch-a/src/main/java/com/example/batch/a/steps/BatchACompleteStep.java)
+[BatchACompleteStep.java](batch-a/src/main/java/com/example/batch/a/steps/BatchACompleteStep.java)
 
-- reads `payloadId` from the batch context
-- logs completion for that payload
+- `@Dependent`
+- reads `payloadId` from the context
+- logs completion
 
-### REST endpoints
+### REST Endpoints
 
-[BatchAControlResource.java](/home/nikola/tmp/qmsg/batch-a/src/main/java/com/example/batch/a/BatchAControlResource.java)
-[BatchAEmitResource.java](/home/nikola/tmp/qmsg/batch-a/src/main/java/com/example/batch/a/BatchAEmitResource.java)
+[BatchAControlResource.java](batch-a/src/main/java/com/example/batch/a/BatchAControlResource.java)
+[BatchAEmitResource.java](batch-a/src/main/java/com/example/batch/a/BatchAEmitResource.java)
 
 - `POST /batch-a/control/start`
 - `POST /batch-a/control/stop`
 - `GET /batch-a/control/status`
-- `POST /batch-a/messages?action=archive-or-null`
+- `POST /batch-a/messages?action=action-or-null`
 
-Publishing request body for `batch-a/messages`:
+Publishing body for `POST /batch-a/messages`:
 
 ```json
 {
@@ -198,14 +296,11 @@ Publishing request body for `batch-a/messages`:
 }
 ```
 
-Notes:
+The emit resource accepts the raw payload body and the publisher wraps it into the message envelope.
 
-- the emit endpoint accepts the raw payload body, not the full message envelope
-- the publisher wraps it into `{ "action": ..., "payload": ... }`
+### Config
 
-### Port and RabbitMQ config
-
-[application.yaml](/home/nikola/tmp/qmsg/batch-a/src/main/resources/application.yaml)
+[application.yaml](batch-a/src/main/resources/application.yaml)
 
 - HTTP port: `8080`
 - RabbitMQ host: `localhost:5672`
@@ -213,13 +308,13 @@ Notes:
 
 ## Batch B
 
-### Module purpose
+### Purpose
 
-`batch-b` is the sample service with one default step and one explicit action.
+`batch-b` demonstrates one default action and one explicit action.
 
 ### Payload
 
-[BatchBData.java](/home/nikola/tmp/qmsg/batch-b/src/main/java/com/example/batch/b/BatchBData.java)
+[BatchBData.java](batch-b/src/main/java/com/example/batch/b/BatchBData.java)
 
 ```json
 {
@@ -231,40 +326,72 @@ Notes:
 
 ### Queue
 
-[BatchBPublisher.java](/home/nikola/tmp/qmsg/batch-b/src/main/java/com/example/batch/b/BatchBPublisher.java)
+[BatchBPublisher.java](batch-b/src/main/java/com/example/batch/b/BatchBPublisher.java)
 
 - queue name: `queue.BatchBService`
 
-### Action mapping
+### Action Mapping
 
-[BatchBService.java](/home/nikola/tmp/qmsg/batch-b/src/main/java/com/example/batch/b/BatchBService.java)
+[BatchBService.java](batch-b/src/main/java/com/example/batch/b/BatchBService.java)
+
+```java
+public class BatchBService extends AbstractBatchService {
+
+  public BatchBService() {
+    super(
+        byDefault(
+            with(BatchBData.class)
+                .execute(BatchBDefaultStep.class)
+        ).on(
+            "archive",
+            with(BatchBData.class)
+                .execute(BatchBArchiveStep.class)
+        )
+    );
+  }
+}
+```
+
+Actions:
 
 - default action `<<default>>`: `BatchBDefaultStep`
 - explicit action `archive`: `BatchBArchiveStep`
 
 ### Steps
 
-[BatchBDefaultStep.java](/home/nikola/tmp/qmsg/batch-b/src/main/java/com/example/batch/b/steps/BatchBDefaultStep.java)
+[BatchBDefaultStep.java](batch-b/src/main/java/com/example/batch/b/steps/BatchBDefaultStep.java)
 
-- logs the typed payload fields
+- `@Dependent`
+- logs typed `BatchBData` fields
 
-[BatchBArchiveStep.java](/home/nikola/tmp/qmsg/batch-b/src/main/java/com/example/batch/b/steps/BatchBArchiveStep.java)
+[BatchBArchiveStep.java](batch-b/src/main/java/com/example/batch/b/steps/BatchBArchiveStep.java)
 
+- `@Dependent`
 - logs archive processing for the payload id
 
-### REST endpoints
+### REST Endpoints
 
-[BatchBControlResource.java](/home/nikola/tmp/qmsg/batch-b/src/main/java/com/example/batch/b/BatchBControlResource.java)
-[BatchBEmitResource.java](/home/nikola/tmp/qmsg/batch-b/src/main/java/com/example/batch/b/BatchBEmitResource.java)
+[BatchBControlResource.java](batch-b/src/main/java/com/example/batch/b/BatchBControlResource.java)
+[BatchBEmitResource.java](batch-b/src/main/java/com/example/batch/b/BatchBEmitResource.java)
 
 - `POST /batch-b/control/start`
 - `POST /batch-b/control/stop`
 - `GET /batch-b/control/status`
 - `POST /batch-b/messages?action=archive-or-null`
 
-### Port and RabbitMQ config
+Publishing body for `POST /batch-b/messages`:
 
-[application.yaml](/home/nikola/tmp/qmsg/batch-b/src/main/resources/application.yaml)
+```json
+{
+  "id": "B-1",
+  "category": "ops",
+  "active": true
+}
+```
+
+### Config
+
+[application.yaml](batch-b/src/main/resources/application.yaml)
 
 - HTTP port: `8081`
 - RabbitMQ host: `localhost:5672`
@@ -272,30 +399,50 @@ Notes:
 
 ## How To Add A New Batch Service
 
-1. Create a new Maven module similar to `batch-a` or `batch-b`.
-2. Define a typed payload record or class.
-3. Implement step beans as `@ApplicationScoped` `BatchStep<P>`.
-4. Extend `AbstractBatchService<P>` and register action chains in the constructor using `ActionStepTypes`.
-5. Extend `AbstractRabbitBatchPublisher` and return the queue name.
-6. Add a control resource by extending `AbstractBatchControlResource<P>`.
-7. Add an emit resource that accepts the raw payload and calls `publisher.publish(action, payload)`.
-8. Add Quarkus YAML config for HTTP and RabbitMQ settings.
+1. Create a Maven module similar to `batch-a` or `batch-b`.
+2. Define one or more payload records/classes, one per action shape if needed.
+3. Implement step beans as `@Dependent` `BatchStep<P>`.
+4. Extend `AbstractBatchService`.
+5. Pass an `Actions` registry to `super(...)` using `BatchService.byDefault`, `BatchService.on`, and `BatchService.with`.
+6. Extend `AbstractRabbitBatchPublisher` and return the queue name.
+7. Add a control resource by extending `AbstractBatchControlResource` and returning the service as `BatchService`.
+8. Add an emit resource that accepts a raw payload and calls `publisher.publish(action, payload)`.
+9. Add Quarkus YAML config for HTTP and RabbitMQ settings.
+
+Example:
+
+```java
+public class MyBatchService extends AbstractBatchService {
+  public MyBatchService() {
+    super(
+        byDefault(
+            with(DefaultPayload.class)
+                .execute(DefaultStepOne.class, DefaultStepTwo.class)
+        ).on(
+            "archive",
+            with(ArchivePayload.class)
+                .execute(ArchiveStep.class)
+        )
+    );
+  }
+}
+```
 
 ## Example Requests
 
-Start consumer:
+Start Batch A consumer:
 
 ```bash
 curl -X POST http://localhost:8080/batch-a/control/start
 ```
 
-Stop consumer:
+Stop Batch A consumer:
 
 ```bash
 curl -X POST http://localhost:8080/batch-a/control/stop
 ```
 
-Check status:
+Check Batch A status:
 
 ```bash
 curl http://localhost:8080/batch-a/control/status
@@ -344,12 +491,11 @@ Prerequisites:
 
 ## Current Caveats
 
-- `BatchStep.action()` is redundant in the current design. Routing is controlled by `ActionStepTypes`.
-- `BatchStep.order()` is also redundant right now. Step order comes from constructor registration order.
-- The internal default action key is `<<default>>`, while several sample step implementations return `"default"` from `action()`. This does not currently break execution because `action()` is not used for dispatch.
-- Consumers auto-start on application startup. Start/stop endpoints still work afterward.
 - On processing failure the message is requeued, so poison messages can loop indefinitely without a dead-letter strategy.
+- `BatchContext.properties()` currently exists, but RabbitMQ delivery properties are not passed from `MessageClientReceiver` into `AbstractBatchService`.
+- Emit resources are currently typed to a single payload class per app. If one service exposes multiple actions with different payload types through one endpoint, the emit layer will need to accept raw JSON or expose action-specific endpoints.
+- `AbstractRabbitBatchPublisher` opens a connection and channel per publish call.
 
 ## Verification State
 
-The source tree includes compiled `target/classes` output from a prior build, but this repository was not recompiled in the current sandbox session because dependency resolution requires network access.
+The repository was not recompiled in this session. Maven/tests were intentionally not run while these framework refactors were being made.
