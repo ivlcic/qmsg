@@ -54,6 +54,10 @@ Behavior:
 - Missing or blank `action` maps to `BatchService.DEFAULT_ACTION`, currently `<<default>>`.
 - The envelope is first read as `Message<JsonNode>`.
 - After action resolution, `payload` is deserialized to the payload type declared for that action.
+- `Message.Receiver` is the functional callback used by `BatchClientReceiver` for raw body handling.
+- `Message.Emitter` is the functional callback used by `BatchClientEmitter` for raw body emission.
+- `Message.Serializer` converts a message envelope to bytes.
+- `Message.Deserializer<P>` converts bytes to a typed message envelope.
 
 ### Batch Service Contract
 
@@ -202,8 +206,7 @@ The resource depends on the `BatchService` interface, not directly on `AbstractB
 Responsibilities:
 
 - creates the destination queue if needed
-- wraps payload into the shared `Message<P>` envelope
-- publishes durable JSON messages to the target queue
+- emits serialized message bytes to the target queue
 - derives the queue name from the service name constructor parameter as `queue.<serviceName>`
 
 Current behavior:
@@ -211,6 +214,17 @@ Current behavior:
 - opens a RabbitMQ connection and channel per publish call
 - sets `contentType` to `application/json`
 - sets `deliveryMode(2)` for persistent messages
+- does not own Jackson serialization; callers pass `Message.Serializer` to `publish(...)`
+
+Emitter injection is generic. Use `@ForBatchService(ServiceClass.class)` at the injection point:
+
+```java
+@Inject
+@ForBatchService(BatchAService.class)
+BatchClientEmitter emitter;
+```
+
+[BatchClientEmitterProducer.java](batch-common/src/main/java/com/example/batch/common/BatchClientEmitterProducer.java) reads the qualifier from the injection point and creates an emitter for that service name.
 
 ## Batch A
 
@@ -232,9 +246,8 @@ Current behavior:
 
 ### Queue
 
-[BatchAPublisher.java](batch-a/src/main/java/com/example/batch/a/BatchAPublisher.java)
-
 - queue name: `queue.BatchAService`
+- emitters targeting this queue inject `@ForBatchService(BatchAService.class) BatchClientEmitter`
 
 ### Action Mapping
 
@@ -297,7 +310,7 @@ Publishing body for `POST /batch-a/messages`:
 }
 ```
 
-The emit resource accepts the raw payload body and the publisher wraps it into the message envelope.
+The emit resource accepts the raw payload body, wraps it into a `Message<BatchAData>`, and passes a `Message.Serializer` to the generic emitter.
 
 ### Config
 
@@ -327,9 +340,8 @@ The emit resource accepts the raw payload body and the publisher wraps it into t
 
 ### Queue
 
-[BatchBPublisher.java](batch-b/src/main/java/com/example/batch/b/BatchBPublisher.java)
-
 - queue name: `queue.BatchBService`
+- emitters targeting this queue inject `@ForBatchService(BatchBService.class) BatchClientEmitter`
 
 ### Action Mapping
 
@@ -404,10 +416,10 @@ Publishing body for `POST /batch-b/messages`:
 2. Define one or more payload records/classes, one per action shape if needed.
 3. Implement step beans as `@Dependent` `BatchStep<P>`.
 4. Extend `AbstractBatchService`.
-5. Pass an `Actions` registry to `super(...)` using `BatchService.byDefault`, `BatchService.on`, and `BatchService.with`.
-6. Extend `BatchClientEmitter` and pass the target service name to `super(...)`.
+5. Pass an `Actions` registry to `super(...)` using `BatchService.byDefault`, `BatchService.with`, and chained `Actions.on`.
+6. Inject `@ForBatchService(MyBatchService.class) BatchClientEmitter` where messages need to be emitted.
 7. Add a control resource by extending `AbstractBatchControlResource` and returning the service as `BatchService`.
-8. Add an emit resource that accepts a raw payload and calls `publisher.publish(action, payload)`.
+8. Add an emit resource that accepts a raw payload, creates a `Message<P>`, and calls `emitter.publish(message, serializer)`.
 9. Add Quarkus YAML config for HTTP and RabbitMQ settings.
 
 Example:
@@ -499,4 +511,10 @@ Prerequisites:
 
 ## Verification State
 
-The repository was not recompiled in this session. Maven/tests were intentionally not run while these framework refactors were being made.
+The repository was compiled successfully with:
+
+```bash
+mvn -q -DskipTests compile
+```
+
+Tests were not run.
