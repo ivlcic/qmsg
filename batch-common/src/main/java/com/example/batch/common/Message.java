@@ -4,6 +4,27 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class Message<P> {
+
+  @FunctionalInterface
+  public interface Receiver {
+    boolean handle(byte[] body) throws Exception;
+  }
+
+  @FunctionalInterface
+  public interface Emitter {
+    void emit(byte[] body) throws Exception;
+  }
+
+  @FunctionalInterface
+  public interface Serializer {
+    byte[] serialize(Message<?> message) throws Exception;
+  }
+
+  @FunctionalInterface
+  public interface Deserializer<P> {
+    Message<P> deserialize(byte[] body) throws Exception;
+  }
+
   private String action;
   private P payload;
 

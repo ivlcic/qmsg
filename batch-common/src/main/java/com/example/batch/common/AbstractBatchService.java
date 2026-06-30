@@ -1,6 +1,5 @@
 package com.example.batch.common;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.arc.All;
@@ -23,7 +22,8 @@ public abstract class AbstractBatchService implements BatchService {
   @Inject
   ObjectMapper objectMapper;
 
-  @Inject @All
+  @Inject
+  @All
   @SuppressWarnings("CdiInjectionPointsInspection")
   List<BatchStep<?>> availableSteps;
 
@@ -39,7 +39,7 @@ public abstract class AbstractBatchService implements BatchService {
     for (BatchStep<?> step : availableSteps) {
       if (type.isInstance(step)) {
         //noinspection unchecked
-        return (S)step;
+        return (S) step;
       }
     }
     throw new IllegalStateException("No batch step bean found for " + type.getName());
@@ -75,25 +75,28 @@ public abstract class AbstractBatchService implements BatchService {
     }
   }
 
-  private boolean handleMessage(byte[] body) {
-    try {
-      Message<JsonNode> message = objectMapper.readValue(
-          body, new TypeReference<>() {}
-      );
+  protected Message.Deserializer<JsonNode> getDeserializer() {
+    return new DefaultDeserializer<>(objectMapper);
+  }
 
-      String action = normalizeAction(message.getAction());
-      Action<?> configuredAction = actions.get(action);
-      if (configuredAction == null || configuredAction.isEmpty()) {
-        throw new RuntimeException(
-            "No steps found for action [" + action + "] in [" + getName() + "] service!"
-        );
+  protected Message.Receiver getReceiver() {
+    return body -> {
+      try {
+        Message<JsonNode> message = getDeserializer().deserialize(body);
+        String action = normalizeAction(message.getAction());
+        Action<?> configuredAction = actions.get(action);
+        if (configuredAction == null || configuredAction.isEmpty()) {
+          throw new RuntimeException(
+              "No steps found for action [" + action + "] in [" + getName() + "] service!"
+          );
+        }
+        executeAction(configuredAction, message.getPayload(), body);
+        return true;
+      } catch (Exception e) {
+        LOG.errorf(e, "Failed to process message from queue %s", queueName());
+        return false;
       }
-      executeAction(configuredAction, message.getPayload(), body);
-      return true;
-    } catch (Exception e) {
-      LOG.errorf(e, "Failed to process message from queue %s", queueName());
-      return false;
-    }
+    };
   }
 
   @Override
@@ -117,7 +120,7 @@ public abstract class AbstractBatchService implements BatchService {
     }
 
     receiver.open(queueName());
-    consumerTag = receiver.consume(this::handleMessage, tag -> {
+    consumerTag = receiver.consume(getReceiver(), tag -> {
       consuming.set(false);
       LOG.infof("Consumer for queue %s was cancelled by the broker", queueName());
     });

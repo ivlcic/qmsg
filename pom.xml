@@ -24,6 +24,7 @@
         <quarkus.platform.version>3.35.4</quarkus.platform.version>
         <quarkus-rabbitmq-client.version>3.3.0</quarkus-rabbitmq-client.version>
         <surefire-plugin.version>3.5.3</surefire-plugin.version>
+        <lombok.version>1.18.46</lombok.version>
     </properties>
 
     <dependencyManagement>
@@ -34,6 +35,12 @@
                 <version>${quarkus.platform.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.projectlombok</groupId>
+                <artifactId>lombok</artifactId>
+                <version>${lombok.version}</version>
+                <scope>provided</scope>
             </dependency>
         </dependencies>
     </dependencyManagement>

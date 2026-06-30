@@ -38,11 +38,11 @@ public class BatchClientReceiver implements AutoCloseable {
     }
   }
 
-  private void handleDelivery(Delivery delivery, MessageHandler messageHandler) throws IOException {
+  private void handleDelivery(Delivery delivery, Message.Receiver receiver) throws IOException {
     long deliveryTag = delivery.getEnvelope().getDeliveryTag();
     boolean ack = false;
     try {
-      ack = messageHandler.handle(delivery.getBody());
+      ack = receiver.handle(delivery.getBody());
     } catch (Exception e) {
       LOG.errorf(e, "Message handler failed for queue %s", queueName);
     }
@@ -75,12 +75,15 @@ public class BatchClientReceiver implements AutoCloseable {
     }
   }
 
-  public synchronized String consume(MessageHandler messageHandler, CancelCallback cancelCallback) {
+  public synchronized String consume(Message.Receiver receiver, CancelCallback cancelCallback) {
     ensureOpen();
     try {
-      return channel.basicConsume(queueName, false,
-          (consumerTag, delivery) -> handleDelivery(delivery, messageHandler),
-          cancelCallback);
+      return channel.basicConsume(
+          queueName,
+          false,
+          (consumerTag, delivery) -> handleDelivery(delivery, receiver),
+          cancelCallback
+      );
     } catch (IOException e) {
       throw new UncheckedIOException(e);
     }
@@ -116,8 +119,4 @@ public class BatchClientReceiver implements AutoCloseable {
     }
   }
 
-  @FunctionalInterface
-  public interface MessageHandler {
-    boolean handle(byte[] body) throws Exception;
-  }
 }
