@@ -24,7 +24,6 @@ public class Steps<P> implements Iterable<BatchStep<P>> {
   }
 
   @Override
-  @SuppressWarnings("NullableProblems")
   public Iterator<BatchStep<P>> iterator() {
     return steps.iterator();
   }

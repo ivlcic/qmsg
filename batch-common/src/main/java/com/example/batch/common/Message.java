@@ -4,25 +4,25 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class Message<P> {
-    private String action;
-    private P payload;
+  private String action;
+  private P payload;
 
-    public Message() {
-    }
+  public Message() {
+  }
 
-    public String getAction() {
-        return action;
-    }
+  public String getAction() {
+    return action;
+  }
 
-    public void setAction(String action) {
-        this.action = action;
-    }
+  public void setAction(String action) {
+    this.action = action;
+  }
 
-    public P getPayload() {
-        return payload;
-    }
+  public P getPayload() {
+    return payload;
+  }
 
-    public void setPayload(P payload) {
-        this.payload = payload;
-    }
+  public void setPayload(P payload) {
+    this.payload = payload;
+  }
 }

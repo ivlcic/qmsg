@@ -9,14 +9,15 @@ import jakarta.enterprise.context.ApplicationScoped;
 @ApplicationScoped
 public class BatchBService extends AbstractBatchService<BatchBData> {
 
-    @Override
-    protected ActionStepTypes<BatchBData> actionStepTypes() {
-        return new ActionStepTypes<BatchBData>()
+  public BatchBService() {
+    super(
+        new ActionStepTypes<BatchBData>()
             .onDefault(
                 BatchBDefaultStep.class
             )
             .on(
                 "archive", BatchBArchiveStep.class
-            );
-    }
+            )
+    );
+  }
 }

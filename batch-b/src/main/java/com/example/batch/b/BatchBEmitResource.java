@@ -14,11 +14,11 @@ import jakarta.ws.rs.core.MediaType;
 @Consumes(MediaType.APPLICATION_JSON)
 @Produces(MediaType.APPLICATION_JSON)
 public class BatchBEmitResource {
-    @Inject
-    BatchBPublisher publisher;
+  @Inject
+  BatchBPublisher publisher;
 
-    @POST
-    public Message<BatchBData> emit(@QueryParam("action") String action, BatchBData payload) {
-        return publisher.publish(action, payload);
-    }
+  @POST
+  public Message<BatchBData> emit(@QueryParam("action") String action, BatchBData payload) {
+    return publisher.publish(action, payload);
+  }
 }

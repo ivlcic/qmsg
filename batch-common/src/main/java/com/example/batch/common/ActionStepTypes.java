@@ -1,11 +1,11 @@
 package com.example.batch.common;
 
-import static com.example.batch.common.AbstractBatchService.DEFAULT_ACTION;
-
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+
+import static com.example.batch.common.AbstractBatchService.DEFAULT_ACTION;
 
 public class ActionStepTypes<P> extends LinkedHashMap<String, StepTypes<P>> {
 

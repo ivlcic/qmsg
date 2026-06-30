@@ -8,23 +8,23 @@ import jakarta.ws.rs.core.MediaType;
 
 @Produces(MediaType.APPLICATION_JSON)
 public abstract class AbstractBatchControlResource<P> {
-    protected abstract AbstractBatchService<P> service();
+  protected abstract AbstractBatchService<P> service();
 
-    @POST
-    @Path("/start")
-    public BatchStatus start() {
-        return service().start();
-    }
+  @POST
+  @Path("/start")
+  public BatchStatus start() {
+    return service().start();
+  }
 
-    @POST
-    @Path("/stop")
-    public BatchStatus stop() {
-        return service().stop();
-    }
+  @POST
+  @Path("/stop")
+  public BatchStatus stop() {
+    return service().stop();
+  }
 
-    @GET
-    @Path("/status")
-    public BatchStatus status() {
-        return service().status();
-    }
+  @GET
+  @Path("/status")
+  public BatchStatus status() {
+    return service().status();
+  }
 }

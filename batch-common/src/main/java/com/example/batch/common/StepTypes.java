@@ -24,7 +24,6 @@ public class StepTypes<P> implements Iterable<Class<? extends BatchStep<P>>> {
   }
 
   @Override
-  @SuppressWarnings("NullableProblems")
   public Iterator<Class<? extends BatchStep<P>>> iterator() {
     return steps.iterator();
   }

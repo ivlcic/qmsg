@@ -10,10 +10,10 @@ import jakarta.enterprise.context.Dependent;
 
 @Dependent
 public class BatchBArchiveStep implements BatchStep<BatchBData> {
-    private static final Logger LOG = Logger.getLogger(BatchBArchiveStep.class);
+  private static final Logger LOG = Logger.getLogger(BatchBArchiveStep.class);
 
-    @Override
-    public void execute(BatchContext<BatchBData> context) {
-        LOG.infof("BatchB archived payload id=%s", context.payload().id());
-    }
+  @Override
+  public void execute(BatchContext<BatchBData> context) {
+    LOG.infof("BatchB archived payload id=%s", context.payload().id());
+  }
 }

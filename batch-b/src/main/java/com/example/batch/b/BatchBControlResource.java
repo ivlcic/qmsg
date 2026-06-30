@@ -8,11 +8,11 @@ import jakarta.ws.rs.Path;
 
 @Path("/batch-b/control")
 public class BatchBControlResource extends AbstractBatchControlResource<BatchBData> {
-    @Inject
-    BatchBService service;
+  @Inject
+  BatchBService service;
 
-    @Override
-    protected AbstractBatchService<BatchBData> service() {
-        return service;
-    }
+  @Override
+  protected AbstractBatchService<BatchBData> service() {
+    return service;
+  }
 }

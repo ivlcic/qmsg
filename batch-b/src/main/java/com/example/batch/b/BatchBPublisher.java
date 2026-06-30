@@ -6,8 +6,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 
 @ApplicationScoped
 public class BatchBPublisher extends AbstractRabbitBatchPublisher {
-    @Override
-    protected String queueName() {
-        return "queue." + BatchBService.class.getSimpleName();
-    }
+  @Override
+  protected String queueName() {
+    return "queue." + BatchBService.class.getSimpleName();
+  }
 }

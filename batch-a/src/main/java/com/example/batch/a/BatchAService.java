@@ -9,11 +9,12 @@ import jakarta.enterprise.context.ApplicationScoped;
 @ApplicationScoped
 public class BatchAService extends AbstractBatchService<BatchAData> {
 
-    @Override
-    protected ActionStepTypes<BatchAData> actionStepTypes() {
-        return new ActionStepTypes<BatchAData>()
-            .onDefault(
-                BatchAReadPayloadStep.class, BatchACompleteStep.class
-            );
+    public BatchAService() {
+        super(
+            new ActionStepTypes<BatchAData>()
+                .onDefault(
+                    BatchAReadPayloadStep.class, BatchACompleteStep.class
+                )
+        );
     }
 }
