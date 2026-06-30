@@ -1,6 +1,7 @@
 package com.example.batch.common;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.arc.All;
 import io.quarkus.runtime.ShutdownEvent;
@@ -10,7 +11,6 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -88,31 +88,38 @@ public abstract class AbstractBatchService {
     return status();
   }
 
-  private <P> boolean handleMessage(byte[] body) {
+  private boolean handleMessage(byte[] body) {
     try {
-      Message<P> message = objectMapper.readValue(
-          new String(body, StandardCharsets.UTF_8), new TypeReference<>() {}
+      Message<JsonNode> message = objectMapper.readValue(
+          body, new TypeReference<Message<JsonNode>>() {}
       );
 
-      String action = message.getAction();
-      if (action == null || action.isBlank()) {
-        action = DEFAULT_ACTION;
-      }
-      @SuppressWarnings("unchecked")
-      Steps<P> actionSteps = (Steps<P>) steps.get(action);
+      String action = normalizeAction(message.getAction());
+      Steps<?> actionSteps = steps.get(action);
       if (actionSteps == null || actionSteps.isEmpty()) {
         throw new RuntimeException(
             "No steps found for action [" + action + "] in [" + getName() + "] service!"
         );
       }
-      BatchContext<P> context = new BatchContext<>(action, message.getPayload(), body, null);
-      for (BatchStep<P> step : actionSteps) {
-        step.execute(context);
-      }
+      executeSteps(action, actionSteps, message.getPayload(), body);
       return true;
     } catch (Exception e) {
       LOG.errorf(e, "Failed to process message from queue %s", queueName());
       return false;
+    }
+  }
+
+  private <P> void executeSteps(
+      String action,
+      Steps<P> actionSteps,
+      JsonNode payload,
+      byte[] body) throws Exception {
+    P typedPayload = payload == null || payload.isNull()
+        ? null
+        : objectMapper.treeToValue(payload, actionSteps.payloadType());
+    BatchContext<P> context = new BatchContext<>(action, typedPayload, body, null);
+    for (BatchStep<P> step : actionSteps) {
+      step.execute(context);
     }
   }
 
@@ -134,5 +141,12 @@ public abstract class AbstractBatchService {
 
   public BatchStatus status() {
     return new BatchStatus(queueName(), consuming.get(), consumerTag);
+  }
+
+  private static String normalizeAction(String action) {
+    if (action == null || action.isBlank()) {
+      return DEFAULT_ACTION;
+    }
+    return action;
   }
 }
