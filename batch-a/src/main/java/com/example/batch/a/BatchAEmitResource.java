@@ -1,13 +1,12 @@
 package com.example.batch.a;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.example.batch.common.BatchClientEmitter;
 import com.example.batch.common.ForBatchService;
 import com.example.batch.common.Message;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
-import lombok.Getter;
 
 import java.nio.charset.StandardCharsets;
 
@@ -16,12 +15,10 @@ import java.nio.charset.StandardCharsets;
 @Produces(MediaType.APPLICATION_JSON)
 public class BatchAEmitResource {
 
-  @Getter
   @Inject
   @ForBatchService(BatchAService.class)
   BatchClientEmitter emitter;
 
-  @Getter
   @Inject
   ObjectMapper objectMapper;
 
