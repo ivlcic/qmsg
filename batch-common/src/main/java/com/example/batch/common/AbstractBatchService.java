@@ -14,9 +14,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.stream.Collectors;
 
-public abstract class AbstractBatchService<P> {
+public abstract class AbstractBatchService {
   private static final Logger LOG = Logger.getLogger(AbstractBatchService.class);
   static final String DEFAULT_ACTION = "<<default>>";
 
@@ -26,24 +25,24 @@ public abstract class AbstractBatchService<P> {
   @Inject
   ObjectMapper objectMapper;
 
-  @Inject
-  @All
+
+  @Inject @All
+  @SuppressWarnings("CdiInjectionPointsInspection")
   List<BatchStep<?>> availableSteps;
 
   private final AtomicBoolean consuming = new AtomicBoolean(false);
-  private final ActionStepTypes<P> actionStepTypes;
-  private final ActionSteps<P> steps = new ActionSteps<>();
+  private final ActionSteps steps;
   private String consumerTag;
 
-  protected AbstractBatchService(ActionStepTypes<P> actionStepTypes) {
-    this.actionStepTypes = actionStepTypes;
+  protected AbstractBatchService(ActionSteps steps) {
+    this.steps = steps;
   }
 
-  @SuppressWarnings("unchecked")
-  private BatchStep<P> resolveStep(Class<? extends BatchStep<P>> type) {
+  private <S extends BatchStep<P>, P> S resolveStep(Class<S> type) {
     for (BatchStep<?> step : availableSteps) {
       if (type.isInstance(step)) {
-        return (BatchStep<P>) step;
+        //noinspection unchecked
+        return (S)step;
       }
     }
     throw new IllegalStateException("No batch step bean found for " + type.getName());
@@ -51,14 +50,13 @@ public abstract class AbstractBatchService<P> {
 
   @PostConstruct
   void initializeSteps() {
-    steps.clear();
-    for (Map.Entry<String, StepTypes<P>> entry : actionStepTypes.entrySet()) {
-      this.steps.put(
-          entry.getKey(),
-          new Steps<>(entry.getValue().stream()
-              .map(this::resolveStep)
-              .collect(Collectors.toList()))
-      );
+    for (Map.Entry<String, Steps<?>> entry : steps.entrySet()) {
+      Steps<?> steps = entry.getValue();
+
+      for (Class<? extends BatchStep<?>> stepType : steps.types()) {
+        BatchStep<?> step = resolveStep(stepType);
+        steps.add(step);
+      }
     }
   }
 
@@ -68,10 +66,6 @@ public abstract class AbstractBatchService<P> {
 
   protected String queueName() {
     return "queue." + getName();
-  }
-
-  protected ActionSteps<P> steps() {
-    return this.steps;
   }
 
   public void onApplicationStart(@Observes StartupEvent event) {
@@ -94,16 +88,18 @@ public abstract class AbstractBatchService<P> {
     return status();
   }
 
-  private boolean handleMessage(byte[] body) {
+  private <P> boolean handleMessage(byte[] body) {
     try {
-      Message<P> message = objectMapper.readValue(new String(body, StandardCharsets.UTF_8), new TypeReference<>() {
-      });
+      Message<P> message = objectMapper.readValue(
+          new String(body, StandardCharsets.UTF_8), new TypeReference<>() {}
+      );
 
       String action = message.getAction();
       if (action == null || action.isBlank()) {
         action = DEFAULT_ACTION;
       }
-      Steps<P> actionSteps = steps.get(action);
+      @SuppressWarnings("unchecked")
+      Steps<P> actionSteps = (Steps<P>) steps.get(action);
       if (actionSteps == null || actionSteps.isEmpty()) {
         throw new RuntimeException(
             "No steps found for action [" + action + "] in [" + getName() + "] service!"

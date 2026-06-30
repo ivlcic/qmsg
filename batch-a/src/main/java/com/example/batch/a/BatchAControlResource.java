@@ -7,12 +7,12 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.Path;
 
 @Path("/batch-a/control")
-public class BatchAControlResource extends AbstractBatchControlResource<BatchAData> {
+public class BatchAControlResource extends AbstractBatchControlResource {
   @Inject
   BatchAService service;
 
   @Override
-  protected AbstractBatchService<BatchAData> service() {
+  protected AbstractBatchService service() {
     return service;
   }
 }
