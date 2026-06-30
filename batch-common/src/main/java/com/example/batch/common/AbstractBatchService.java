@@ -18,7 +18,7 @@ public abstract class AbstractBatchService implements BatchService {
   private static final Logger LOG = Logger.getLogger(AbstractBatchService.class);
 
   @Inject
-  MessageClientReceiver receiver;
+  BatchClientReceiver receiver;
 
   @Inject
   ObjectMapper objectMapper;
@@ -35,13 +35,6 @@ public abstract class AbstractBatchService implements BatchService {
     this.actions = actions;
   }
 
-  private static String normalizeAction(String action) {
-    if (action == null || action.isBlank()) {
-      return DEFAULT_ACTION;
-    }
-    return action;
-  }
-
   private <S extends BatchStep<P>, P> S resolveStep(Class<S> type) {
     for (BatchStep<?> step : availableSteps) {
       if (type.isInstance(step)) {
@@ -52,6 +45,12 @@ public abstract class AbstractBatchService implements BatchService {
     throw new IllegalStateException("No batch step bean found for " + type.getName());
   }
 
+  private <P> void initializeAction(Action<P> action) {
+    for (Class<? extends BatchStep<P>> stepType : action.stepTypes()) {
+      action.addStep(resolveStep(stepType));
+    }
+  }
+
   @PostConstruct
   void initializeSteps() {
     for (Action<?> action : actions.values()) {
@@ -59,9 +58,20 @@ public abstract class AbstractBatchService implements BatchService {
     }
   }
 
-  private <P> void initializeAction(Action<P> action) {
-    for (Class<? extends BatchStep<P>> stepType : action.stepTypes()) {
-      action.addStep(resolveStep(stepType));
+  private static String normalizeAction(String action) {
+    if (action == null || action.isBlank()) {
+      return DEFAULT_ACTION;
+    }
+    return action;
+  }
+
+  private <P> void executeAction(Action<P> action, JsonNode payload, byte[] body) throws Exception {
+    P typedPayload = payload == null || payload.isNull()
+        ? null
+        : objectMapper.treeToValue(payload, action.payloadType());
+    BatchContext<P> context = new BatchContext<>(action.name(), typedPayload, body, null);
+    for (BatchStep<P> step : action) {
+      step.execute(context);
     }
   }
 
@@ -83,19 +93,6 @@ public abstract class AbstractBatchService implements BatchService {
     } catch (Exception e) {
       LOG.errorf(e, "Failed to process message from queue %s", queueName());
       return false;
-    }
-  }
-
-  private <P> void executeAction(
-      Action<P> action,
-      JsonNode payload,
-      byte[] body) throws Exception {
-    P typedPayload = payload == null || payload.isNull()
-        ? null
-        : objectMapper.treeToValue(payload, action.payloadType());
-    BatchContext<P> context = new BatchContext<>(action.name(), typedPayload, body, null);
-    for (BatchStep<P> step : action) {
-      step.execute(context);
     }
   }
 

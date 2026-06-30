@@ -13,8 +13,8 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 
 @Dependent
-public class MessageClientReceiver implements AutoCloseable {
-  private static final Logger LOG = Logger.getLogger(MessageClientReceiver.class);
+public class BatchClientReceiver implements AutoCloseable {
+  private static final Logger LOG = Logger.getLogger(BatchClientReceiver.class);
 
   @Inject
   @SuppressWarnings("CdiInjectionPointsInspection")

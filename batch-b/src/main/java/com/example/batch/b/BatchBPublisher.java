@@ -1,13 +1,12 @@
 package com.example.batch.b;
 
-import com.example.batch.common.AbstractRabbitBatchPublisher;
+import com.example.batch.common.BatchClientEmitter;
 
 import jakarta.enterprise.context.ApplicationScoped;
 
 @ApplicationScoped
-public class BatchBPublisher extends AbstractRabbitBatchPublisher {
-  @Override
-  protected String queueName() {
-    return "queue." + BatchBService.class.getSimpleName();
+public class BatchBPublisher extends BatchClientEmitter {
+  public BatchBPublisher() {
+    super(BatchBService.class.getSimpleName());
   }
 }

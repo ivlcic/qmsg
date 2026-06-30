@@ -11,14 +11,30 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 
-public abstract class AbstractRabbitBatchPublisher {
+public class BatchClientEmitter {
   @Inject
+  @SuppressWarnings("CdiInjectionPointsInspection")
   RabbitMQClient rabbitMQClient;
 
   @Inject
   ObjectMapper objectMapper;
 
-  protected abstract String queueName();
+  private final String serviceName;
+
+  protected BatchClientEmitter(String serviceName) {
+    if (serviceName == null || serviceName.isBlank()) {
+      throw new IllegalArgumentException("Service name is required");
+    }
+    this.serviceName = serviceName;
+  }
+
+  protected String serviceName() {
+    return serviceName;
+  }
+
+  protected String queueName() {
+    return "queue." + serviceName;
+  }
 
   public <P> Message<P> publish(String action, P payload) {
     Message<P> message = new Message<>();

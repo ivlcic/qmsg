@@ -156,9 +156,9 @@ Conventions:
 - A single action chain must use one payload type across all of its steps.
 - Different actions in the same service may use different payload types.
 
-### Message Receiver
+### Batch Client Receiver
 
-[MessageClientReceiver.java](batch-common/src/main/java/com/example/batch/common/MessageClientReceiver.java)
+[BatchClientReceiver.java](batch-common/src/main/java/com/example/batch/common/BatchClientReceiver.java)
 
 Responsibilities:
 
@@ -195,15 +195,16 @@ Exposes:
 
 The resource depends on the `BatchService` interface, not directly on `AbstractBatchService`.
 
-### Shared Publisher
+### Batch Client Emitter
 
-[AbstractRabbitBatchPublisher.java](batch-common/src/main/java/com/example/batch/common/AbstractRabbitBatchPublisher.java)
+[BatchClientEmitter.java](batch-common/src/main/java/com/example/batch/common/BatchClientEmitter.java)
 
 Responsibilities:
 
 - creates the destination queue if needed
 - wraps payload into the shared `Message<P>` envelope
 - publishes durable JSON messages to the target queue
+- derives the queue name from the service name constructor parameter as `queue.<serviceName>`
 
 Current behavior:
 
@@ -404,7 +405,7 @@ Publishing body for `POST /batch-b/messages`:
 3. Implement step beans as `@Dependent` `BatchStep<P>`.
 4. Extend `AbstractBatchService`.
 5. Pass an `Actions` registry to `super(...)` using `BatchService.byDefault`, `BatchService.on`, and `BatchService.with`.
-6. Extend `AbstractRabbitBatchPublisher` and return the queue name.
+6. Extend `BatchClientEmitter` and pass the target service name to `super(...)`.
 7. Add a control resource by extending `AbstractBatchControlResource` and returning the service as `BatchService`.
 8. Add an emit resource that accepts a raw payload and calls `publisher.publish(action, payload)`.
 9. Add Quarkus YAML config for HTTP and RabbitMQ settings.
@@ -492,9 +493,9 @@ Prerequisites:
 ## Current Caveats
 
 - On processing failure the message is requeued, so poison messages can loop indefinitely without a dead-letter strategy.
-- `BatchContext.properties()` currently exists, but RabbitMQ delivery properties are not passed from `MessageClientReceiver` into `AbstractBatchService`.
+- `BatchContext.properties()` currently exists, but RabbitMQ delivery properties are not passed from `BatchClientReceiver` into `AbstractBatchService`.
 - Emit resources are currently typed to a single payload class per app. If one service exposes multiple actions with different payload types through one endpoint, the emit layer will need to accept raw JSON or expose action-specific endpoints.
-- `AbstractRabbitBatchPublisher` opens a connection and channel per publish call.
+- `BatchClientEmitter` opens a connection and channel per publish call.
 
 ## Verification State
 
