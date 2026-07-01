@@ -26,5 +26,9 @@
             <artifactId>quarkus-rabbitmq-client</artifactId>
             <version>${quarkus-rabbitmq-client.version}</version>
         </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-micrometer-registry-prometheus</artifactId>
+        </dependency>
     </dependencies>
 </project>

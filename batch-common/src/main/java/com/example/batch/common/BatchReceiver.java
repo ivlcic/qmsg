@@ -24,12 +24,12 @@ public class BatchReceiver implements AutoCloseable {
   private Channel channel;
   private String queueName;
 
-  private boolean isOpenFor(String queueName) {
-    return isOpen() && queueName.equals(this.queueName);
-  }
-
   private boolean isOpen() {
     return channel != null && channel.isOpen() && connection != null && connection.isOpen();
+  }
+
+  private boolean isOpenFor(String queueName) {
+    return isOpen() && queueName.equals(this.queueName);
   }
 
   private void ensureOpen() {
@@ -58,6 +58,24 @@ public class BatchReceiver implements AutoCloseable {
       channel.basicAck(deliveryTag, false);
     } else {
       channel.basicNack(deliveryTag, false, true);
+    }
+  }
+
+  @Override
+  public synchronized void close() {
+    try {
+      if (channel != null && channel.isOpen()) {
+        channel.close();
+      }
+      if (connection != null && connection.isOpen()) {
+        connection.close();
+      }
+    } catch (Exception e) {
+      LOG.warnf(e, "Failed to close receiver for queue %s", queueName);
+    } finally {
+      channel = null;
+      connection = null;
+      queueName = null;
     }
   }
 
@@ -106,24 +124,6 @@ public class BatchReceiver implements AutoCloseable {
       channel.basicCancel(consumerTag);
     } catch (IOException e) {
       throw new UncheckedIOException(e);
-    }
-  }
-
-  @Override
-  public synchronized void close() {
-    try {
-      if (channel != null && channel.isOpen()) {
-        channel.close();
-      }
-      if (connection != null && connection.isOpen()) {
-        connection.close();
-      }
-    } catch (Exception e) {
-      LOG.warnf(e, "Failed to close receiver for queue %s", queueName);
-    } finally {
-      channel = null;
-      connection = null;
-      queueName = null;
     }
   }
 }

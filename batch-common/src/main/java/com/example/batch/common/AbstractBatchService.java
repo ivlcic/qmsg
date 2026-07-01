@@ -10,7 +10,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 public abstract class AbstractBatchService implements BatchService {
   private static final Logger LOG = Logger.getLogger(AbstractBatchService.class);
@@ -22,16 +22,45 @@ public abstract class AbstractBatchService implements BatchService {
   ObjectMapper objectMapper;
 
   @Inject
+  BatchMetrics batchMetrics;
+
+  @Inject
+  BatchEmitter batchEmitter;
+
+  @Inject
   @All
   @SuppressWarnings("CdiInjectionPointsInspection")
   List<BatchStep<?>> availableSteps;
 
-  private final AtomicBoolean consuming = new AtomicBoolean(false);
+  private final AtomicReference<BatchServiceState> state = new AtomicReference<>(BatchServiceState.initializing);
   private final Actions actions;
+  private BatchMetrics.ServiceMetrics metrics;
+  private BatchEmitter.ServiceEmitter emitter;
   private String consumerTag;
 
   protected AbstractBatchService(Actions actions) {
     this.actions = actions;
+  }
+
+  @Override
+  public String getName() {
+    return getClass().getSimpleName();
+  }
+
+  protected String queueName() {
+    return "queue." + getName();
+  }
+
+  @Override
+  public BatchStatus status() {
+    return new BatchStatus(queueName(), state.get(), consumerTag);
+  }
+
+  private static String normalizeAction(String action) {
+    if (action == null || action.isBlank()) {
+      return DEFAULT_ACTION;
+    }
+    return action;
   }
 
   private <S extends BatchStep<P>, P> S resolveStep(Class<S> type) {
@@ -52,16 +81,12 @@ public abstract class AbstractBatchService implements BatchService {
 
   @PostConstruct
   void initializeSteps() {
+    metrics = batchMetrics.forService(getName());
+    emitter = batchEmitter.forService(getName());
     for (Action<?> action : actions.values()) {
       initializeAction(action);
     }
-  }
-
-  private static String normalizeAction(String action) {
-    if (action == null || action.isBlank()) {
-      return DEFAULT_ACTION;
-    }
-    return action;
+    state.set(BatchServiceState.initialized);
   }
 
   protected <X> Message.Deserializer<X> getDeserializer() {
@@ -72,8 +97,41 @@ public abstract class AbstractBatchService implements BatchService {
     return new DefaultSerializer(objectMapper);
   }
 
-  protected BatchEmitter getEmitter() {
-    return new BatchEmitter(getName(), receiver.rabbitMQClient);
+  protected BatchEmitter.ServiceEmitter getEmitter() {
+    return emitter;
+  }
+
+  public <P> boolean execute(BatchContext<P> context) throws Exception {
+    String actionName = normalizeAction(context.action());
+    Action<?> targetAction = actions.get(actionName);
+    if (targetAction == null || targetAction.isEmpty()) {
+      metrics.recordExecutionError(actionName);
+      throw new RuntimeException(
+          "No steps found for action [" + actionName + "] in [" + getName() + "] service!"
+      );
+    }
+    @SuppressWarnings("unchecked")
+    Action<P> a = (Action<P>) targetAction;
+    int stepIndex = 0;
+    for (BatchStep<P> step : a) {
+      String stepName = a.stepTypes().get(stepIndex).getSimpleName();
+      try {
+        step.execute(context);
+        metrics.recordStep(actionName, stepName);
+      } catch (Exception e) {
+        metrics.recordExecutionError(actionName);
+        metrics.recordStepError(actionName, stepName);
+        throw e;
+      }
+      stepIndex++;
+    }
+    metrics.recordExecution(actionName);
+    return true;
+  }
+
+  public <P> boolean execute(String requestedAction, P payload) throws Exception {
+    BatchContext<P> context = new BatchContext<>(requestedAction, payload);
+    return execute(context);
   }
 
   protected <M extends Message<P>, P> Message.Processor<M, P> getProcessor() {
@@ -93,15 +151,6 @@ public abstract class AbstractBatchService implements BatchService {
     };
   }
 
-  @Override
-  public String getName() {
-    return getClass().getSimpleName();
-  }
-
-  protected String queueName() {
-    return "queue." + getName();
-  }
-
   public <P> Message<P> emit(String action, P payload) throws Exception {
     return getEmitter().emit(action, payload, getSerializer());
   }
@@ -110,68 +159,48 @@ public abstract class AbstractBatchService implements BatchService {
     return getEmitter().emit(action, payload, serializer);
   }
 
+  @Override
+  public synchronized BatchStatus start() {
+    if (state.get() == BatchServiceState.started || state.get() == BatchServiceState.starting) {
+      return status();
+    }
+
+    state.set(BatchServiceState.starting);
+    receiver.open(queueName());
+    try {
+      consumerTag = receiver.consume(getReader(), getProcessor(), tag -> {
+        state.set(BatchServiceState.stopped);
+        LOG.infof("Consumer for queue %s was cancelled by the broker", queueName());
+      });
+      state.set(BatchServiceState.started);
+      LOG.infof("Started consuming queue %s with consumer tag %s", queueName(), consumerTag);
+    } catch (RuntimeException e) {
+      state.set(BatchServiceState.stopped);
+      throw e;
+    }
+    return status();
+  }
+
+  @Override
+  public synchronized BatchStatus stop() {
+    if (state.get() != BatchServiceState.started) {
+      return status();
+    }
+
+    state.set(BatchServiceState.stopping);
+    receiver.cancel(consumerTag);
+    state.set(BatchServiceState.stopped);
+    LOG.infof("Stopped consuming queue %s", queueName());
+    return status();
+  }
+
   void onApplicationStart(@Observes StartupEvent event) {
     receiver.open(queueName());
     start();
   }
 
-  @Override
-  public synchronized BatchStatus start() {
-    if (consuming.get()) {
-      return status();
-    }
-
-    receiver.open(queueName());
-    consumerTag = receiver.consume(getReader(), getProcessor(), tag -> {
-      consuming.set(false);
-      LOG.infof("Consumer for queue %s was cancelled by the broker", queueName());
-    });
-    consuming.set(true);
-    LOG.infof("Started consuming queue %s with consumer tag %s", queueName(), consumerTag);
-    return status();
-  }
-
-
-  public <P> boolean execute(BatchContext<P> context) throws Exception {
-    String actionName = normalizeAction(context.action());
-    Action<?> targetAction = actions.get(actionName);
-    if (targetAction == null || targetAction.isEmpty()) {
-      throw new RuntimeException(
-          "No steps found for action [" + actionName + "] in [" + getName() + "] service!"
-      );
-    }
-    @SuppressWarnings("unchecked")
-    Action<P> a = (Action<P>) targetAction;
-    for (BatchStep<P> step : a) {
-      step.execute(context);
-    }
-    return true;
-  }
-
-  public <P> boolean execute(String requestedAction, P payload) throws Exception {
-    BatchContext<P> context = new BatchContext<>(requestedAction, payload);
-    return execute(context);
-  }
-
   void onApplicationShutdown(@Observes ShutdownEvent event) {
     stop();
     receiver.close();
-  }
-
-  @Override
-  public synchronized BatchStatus stop() {
-    if (!consuming.get()) {
-      return status();
-    }
-
-    receiver.cancel(consumerTag);
-    consuming.set(false);
-    LOG.infof("Stopped consuming queue %s", queueName());
-    return status();
-  }
-
-  @Override
-  public BatchStatus status() {
-    return new BatchStatus(queueName(), consuming.get(), consumerTag);
   }
 }

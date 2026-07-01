@@ -11,10 +11,6 @@ public class Action<P> implements Iterable<BatchStep<P>> {
   private final List<Class<? extends BatchStep<P>>> stepTypes;
   private final List<BatchStep<P>> steps = new ArrayList<>();
 
-  public Action(String name, BatchService.ActionDefinition<P> definition) {
-    this(name, definition.payloadType(), definition.stepTypes());
-  }
-
   public Action(String name, Class<P> payloadType, Collection<Class<? extends BatchStep<P>>> stepTypes) {
     if (name == null || name.isBlank()) {
       throw new IllegalArgumentException("Action name is required");
@@ -28,6 +24,10 @@ public class Action<P> implements Iterable<BatchStep<P>> {
     this.name = name;
     this.payloadType = payloadType;
     this.stepTypes = List.copyOf(stepTypes);
+  }
+
+  public Action(String name, BatchService.ActionDefinition<P> definition) {
+    this(name, definition.payloadType(), definition.stepTypes());
   }
 
   public String name() {
