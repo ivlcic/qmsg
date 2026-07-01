@@ -6,16 +6,17 @@ import jakarta.enterprise.inject.Produces;
 import jakarta.enterprise.inject.spi.InjectionPoint;
 
 @Dependent
-public class BatchClientEmitterProducer {
+public class BatchEmitterProducer {
 
   @Produces
   @Dependent
   @ForBatchService
-  BatchClientEmitter create(InjectionPoint injectionPoint, RabbitMQClient rabbitMQClient) {
+  @SuppressWarnings("CdiInjectionPointsInspection")
+  BatchEmitter create(InjectionPoint injectionPoint, RabbitMQClient rabbitMQClient) {
     ForBatchService qualifier = injectionPoint.getAnnotated().getAnnotation(ForBatchService.class);
     if (qualifier == null || BatchService.class.equals(qualifier.value())) {
-      throw new IllegalStateException("BatchClientEmitter injection point must declare @ForBatchService");
+      throw new IllegalStateException("BatchEmitter injection point must declare @ForBatchService");
     }
-    return new BatchClientEmitter(qualifier.value().getSimpleName(), rabbitMQClient);
+    return new BatchEmitter(qualifier.value().getSimpleName(), rabbitMQClient);
   }
 }

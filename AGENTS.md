@@ -185,7 +185,7 @@ Carries per-message execution state:
 - receive timestamp
 - per-message attributes map for sharing state between steps
 
-Current note: `AbstractBatchService` currently passes `null` for RabbitMQ properties because the receiver handler contract only passes message body bytes.
+Current note: `AbstractBatchService` currently passes `null` for RabbitMQ properties because the reader handler contract only passes message body bytes.
 
 ### Shared REST Control Resource
 

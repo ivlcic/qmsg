@@ -1,6 +1,5 @@
 package com.example.batch.common;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.arc.All;
 import io.quarkus.runtime.ShutdownEvent;
@@ -11,13 +10,14 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public abstract class AbstractBatchService implements BatchService {
   private static final Logger LOG = Logger.getLogger(AbstractBatchService.class);
 
   @Inject
-  BatchClientReceiver receiver;
+  BatchReceiver receiver;
 
   @Inject
   ObjectMapper objectMapper;
@@ -65,36 +65,31 @@ public abstract class AbstractBatchService implements BatchService {
     return action;
   }
 
-  private <P> void executeAction(Action<P> action, JsonNode payload, byte[] body) throws Exception {
-    P typedPayload = payload == null || payload.isNull()
-        ? null
-        : objectMapper.treeToValue(payload, action.payloadType());
-    BatchContext<P> context = new BatchContext<>(action.name(), typedPayload, body, null);
-    for (BatchStep<P> step : action) {
-      step.execute(context);
-    }
-  }
-
-  protected Message.Deserializer<JsonNode> getDeserializer() {
+  protected <X> Message.Deserializer<X> getDeserializer() {
     return new DefaultDeserializer<>(objectMapper);
   }
 
-  protected Message.Receiver getReceiver() {
+  protected Message.Serializer getSerializer() {
+    return new DefaultSerializer(objectMapper);
+  }
+
+  protected BatchEmitter getEmitter() {
+    return new BatchEmitter(getName(), receiver.rabbitMQClient);
+  }
+
+  protected <M extends Message<P>, P> Message.Processor<M, P> getProcessor() {
+    return message -> execute(message.getAction(), message.getPayload(), Optional.empty());
+  }
+
+  protected <M extends Message<P>, P> Message.Reader<M, P> getReader() {
     return body -> {
       try {
-        Message<JsonNode> message = getDeserializer().deserialize(body);
-        String action = normalizeAction(message.getAction());
-        Action<?> configuredAction = actions.get(action);
-        if (configuredAction == null || configuredAction.isEmpty()) {
-          throw new RuntimeException(
-              "No steps found for action [" + action + "] in [" + getName() + "] service!"
-          );
-        }
-        executeAction(configuredAction, message.getPayload(), body);
-        return true;
+        Message.Deserializer<Message<P>> nodeDeserializer = getDeserializer();
+        //noinspection unchecked
+        return (M)nodeDeserializer.deserialize(body);
       } catch (Exception e) {
         LOG.errorf(e, "Failed to process message from queue %s", queueName());
-        return false;
+        return null;
       }
     };
   }
@@ -108,7 +103,15 @@ public abstract class AbstractBatchService implements BatchService {
     return "queue." + getName();
   }
 
-  public void onApplicationStart(@Observes StartupEvent event) {
+  public <P> Message<P> emit(String action, P payload) throws Exception {
+    return getEmitter().emit(action, payload, getSerializer());
+  }
+
+  public <P> Message<P> emit(String action, P payload, Message.Serializer serializer) throws Exception {
+    return getEmitter().emit(action, payload, serializer);
+  }
+
+  void onApplicationStart(@Observes StartupEvent event) {
     receiver.open(queueName());
     start();
   }
@@ -120,7 +123,7 @@ public abstract class AbstractBatchService implements BatchService {
     }
 
     receiver.open(queueName());
-    consumerTag = receiver.consume(getReceiver(), tag -> {
+    consumerTag = receiver.consume(getReader(), getProcessor(), tag -> {
       consuming.set(false);
       LOG.infof("Consumer for queue %s was cancelled by the broker", queueName());
     });
@@ -129,7 +132,24 @@ public abstract class AbstractBatchService implements BatchService {
     return status();
   }
 
-  public void onApplicationShutdown(@Observes ShutdownEvent event) {
+  public <P> boolean execute(String requestedAction, P payload, Optional<byte[]> rawBody) throws Exception {
+    String actionName = normalizeAction(requestedAction);
+    Action<?> configuredAction = actions.get(actionName);
+    if (configuredAction == null || configuredAction.isEmpty()) {
+      throw new RuntimeException(
+          "No steps found for action [" + actionName + "] in [" + getName() + "] service!"
+      );
+    }
+    BatchContext<P> context = new BatchContext<>(actionName, payload, rawBody, null);
+    @SuppressWarnings("unchecked")
+    Action<P> action = (Action<P>) configuredAction;
+    for (BatchStep<P> step : action) {
+      step.execute(context);
+    }
+    return true;
+  }
+
+  void onApplicationShutdown(@Observes ShutdownEvent event) {
     stop();
     receiver.close();
   }

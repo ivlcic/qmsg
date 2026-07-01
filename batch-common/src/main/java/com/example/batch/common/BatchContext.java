@@ -6,16 +6,17 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 
 public class BatchContext<P> {
   private final String action;
   private final P payload;
-  private final byte[] rawBody;
+  private final Optional<byte[]> rawBody;
   private final AMQP.BasicProperties properties;
   private final Instant receivedAt;
   private final Map<String, Object> attributes = new HashMap<>();
 
-  public BatchContext(String action, P payload, byte[] rawBody, AMQP.BasicProperties properties) {
+  public BatchContext(String action, P payload, Optional<byte[]> rawBody, AMQP.BasicProperties properties) {
     this.action = action;
     this.payload = payload;
     this.rawBody = rawBody;
@@ -31,12 +32,14 @@ public class BatchContext<P> {
     return payload;
   }
 
-  public byte[] rawBody() {
+  public Optional<byte[]> rawBody() {
     return rawBody;
   }
 
   public String rawBodyAsString() {
-    return new String(rawBody, StandardCharsets.UTF_8);
+    return rawBody
+        .map(bytes -> new String(bytes, StandardCharsets.UTF_8))
+        .orElse(null);
   }
 
   public AMQP.BasicProperties properties() {

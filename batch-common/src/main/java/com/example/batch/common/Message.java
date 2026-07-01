@@ -6,13 +6,18 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 public class Message<P> {
 
   @FunctionalInterface
-  public interface Receiver {
-    boolean handle(byte[] body) throws Exception;
+  public interface Reader<M extends Message<P>, P> {
+    M read(byte[] body) throws Exception;
   }
 
   @FunctionalInterface
-  public interface Emitter {
-    void emit(byte[] body) throws Exception;
+  public interface Processor<M extends Message<P>, P> {
+    boolean process(M message) throws Exception;
+  }
+
+  @FunctionalInterface
+  public interface Writer {
+    void write(byte[] body) throws Exception;
   }
 
   @FunctionalInterface

@@ -8,11 +8,11 @@ import io.quarkiverse.rabbitmqclient.RabbitMQClient;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 
-public class BatchClientEmitter {
+public class BatchEmitter {
   private final String serviceName;
   private final RabbitMQClient rabbitMQClient;
 
-  BatchClientEmitter(String serviceName, RabbitMQClient rabbitMQClient) {
+  BatchEmitter(String serviceName, RabbitMQClient rabbitMQClient) {
     if (serviceName == null || serviceName.isBlank()) {
       throw new IllegalArgumentException("Service name is required");
     }
@@ -34,14 +34,14 @@ public class BatchClientEmitter {
         .build();
   }
 
-  private Message.Emitter emitter(Channel channel) {
+  private Message.Writer emitter(Channel channel) {
     return body -> channel.basicPublish("", queueName(), properties(), body);
   }
 
   public <P> void emit(Message<P> message, Message.Serializer serializer) {
     try (Connection connection = rabbitMQClient.connect(); Channel channel = connection.createChannel()) {
       channel.queueDeclare(queueName(), true, false, false, null);
-      emitter(channel).emit(serializer.serialize(message));
+      emitter(channel).write(serializer.serialize(message));
     } catch (IOException e) {
       throw new UncheckedIOException(e);
     } catch (Exception e) {
@@ -49,8 +49,7 @@ public class BatchClientEmitter {
     }
   }
 
-  public <P> Message<P> emit(String action, P payload, Message.Serializer serializer)
-      throws Exception {
+  public <P> Message<P> emit(String action, P payload, Message.Serializer serializer) throws Exception {
     Message<P> message = new Message<>();
     message.setAction(action);
     message.setPayload(payload);

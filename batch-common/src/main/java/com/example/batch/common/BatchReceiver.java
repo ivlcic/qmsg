@@ -13,8 +13,8 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 
 @Dependent
-public class BatchClientReceiver implements AutoCloseable {
-  private static final Logger LOG = Logger.getLogger(BatchClientReceiver.class);
+public class BatchReceiver implements AutoCloseable {
+  private static final Logger LOG = Logger.getLogger(BatchReceiver.class);
 
   @Inject
   @SuppressWarnings("CdiInjectionPointsInspection")
@@ -34,17 +34,24 @@ public class BatchClientReceiver implements AutoCloseable {
 
   private void ensureOpen() {
     if (!isOpen()) {
-      throw new IllegalStateException("Receiver is not open");
+      throw new IllegalStateException("Reader is not open");
     }
   }
 
-  private void handleDelivery(Delivery delivery, Message.Receiver receiver) throws IOException {
+  private <M extends Message<P>, P> void handleDelivery(
+      Delivery delivery, Message.Reader<M, P> reader, Message.Processor<M, P> processor) throws IOException {
     long deliveryTag = delivery.getEnvelope().getDeliveryTag();
     boolean ack = false;
+    M msg;
     try {
-      ack = receiver.handle(delivery.getBody());
+      msg = reader.read(delivery.getBody());
+      try {
+        ack = processor.process(msg);
+      } catch (Exception e) {
+        LOG.errorf(e, "Message processor failed for queue %s", queueName);
+      }
     } catch (Exception e) {
-      LOG.errorf(e, "Message handler failed for queue %s", queueName);
+      LOG.errorf(e, "Message reader failed for queue %s", queueName);
     }
 
     if (ack) {
@@ -75,13 +82,14 @@ public class BatchClientReceiver implements AutoCloseable {
     }
   }
 
-  public synchronized String consume(Message.Receiver receiver, CancelCallback cancelCallback) {
+  public synchronized <M extends Message<P>, P> String consume(
+      Message.Reader<M, P> reader, Message.Processor<M, P> processor, CancelCallback cancelCallback) {
     ensureOpen();
     try {
       return channel.basicConsume(
           queueName,
           false,
-          (consumerTag, delivery) -> handleDelivery(delivery, receiver),
+          (consumerTag, delivery) -> handleDelivery(delivery, reader, processor),
           cancelCallback
       );
     } catch (IOException e) {
@@ -118,5 +126,4 @@ public class BatchClientReceiver implements AutoCloseable {
       queueName = null;
     }
   }
-
 }
