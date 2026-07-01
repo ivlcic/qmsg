@@ -23,22 +23,20 @@ public class BatchBResource implements BatchStatusResource {
   }
 
   @POST
-  public Message<BatchBData1> async(@QueryParam("action") String action, BatchBData1 payload) throws Exception {
+  @Path("/exec_async")
+  public Message<BatchBData1> async(BatchBData1 payload) throws Exception {
+    return service.emit(null, payload, new DefaultSerializer(objectMapper));
+  }
+
+  @POST
+  @Path("/exec_async/{action : \\w{3,}}")
+  public Message<BatchBData1> async(@PathParam("action") String action, BatchBData1 payload) throws Exception {
     return service.emit(action, payload, new DefaultSerializer(objectMapper));
   }
 
   @POST
-  public void sync(@QueryParam("action") String action, BatchBData1 payload) throws Exception {
-    service.execute(action, payload);
-  }
-
-  @POST
-  public Message<BatchBData2> async(@QueryParam("action") String action, BatchBData2 payload) throws Exception {
-    return service.emit(action, payload, new DefaultSerializer(objectMapper));
-  }
-
-  @POST
-  public void sync(@QueryParam("action") String action, BatchBData2 payload) throws Exception {
+  @Path("/exec/{action : \\w{3,}}")
+  public void sync(@PathParam("action") String action, BatchBData2 payload) throws Exception {
     service.execute(action, payload);
   }
 }

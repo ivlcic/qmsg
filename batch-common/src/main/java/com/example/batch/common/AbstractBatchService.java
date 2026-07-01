@@ -36,7 +36,41 @@ public abstract class AbstractBatchService implements BatchService {
   private final Actions actions;
   private BatchMetrics.ServiceMetrics metrics;
   private BatchEmitter.ServiceEmitter emitter;
-  private String consumerTag;
+  private volatile String consumerTag;
+
+  private class ReceiverRetryController implements BatchReceiver.Controller {
+
+    @Override
+    public String queueName() {
+      return "queue." + getName();
+    }
+
+    @Override
+    public boolean isRetryForbidden() {
+      BatchServiceState current = state.get();
+      return current != BatchServiceState.starting && current != BatchServiceState.started;
+    }
+
+    @Override
+    public void clearConsumerTag() {
+      consumerTag = null;
+    }
+
+    @Override
+    public void retryPending() {
+      state.set(BatchServiceState.starting);
+    }
+
+    @Override
+    public void retrySuccess() {
+      state.set(BatchServiceState.started);
+    }
+
+    @Override
+    public void attemptStart() {
+      AbstractBatchService.this.attemptStart();
+    }
+  }
 
   protected AbstractBatchService(Actions actions) {
     this.actions = actions;
@@ -47,13 +81,9 @@ public abstract class AbstractBatchService implements BatchService {
     return getClass().getSimpleName();
   }
 
-  protected String queueName() {
-    return "queue." + getName();
-  }
-
   @Override
   public BatchStatus status() {
-    return new BatchStatus(queueName(), state.get(), consumerTag);
+    return new BatchStatus(getName(), state.get(), consumerTag);
   }
 
   private static String normalizeAction(String action) {
@@ -145,7 +175,7 @@ public abstract class AbstractBatchService implements BatchService {
         //noinspection unchecked
         return (M)nodeDeserializer.deserialize(body);
       } catch (Exception e) {
-        LOG.errorf(e, "Failed to process message from queue %s", queueName());
+        LOG.errorf(e, "Failed to process message from queue for service [%s]!", getName());
         return null;
       }
     };
@@ -159,6 +189,24 @@ public abstract class AbstractBatchService implements BatchService {
     return getEmitter().emit(action, payload, serializer);
   }
 
+  private synchronized BatchStatus attemptStart() {
+    BatchReceiver.Controller controller = new ReceiverRetryController();
+    try {
+      receiver.open(controller);
+      consumerTag = receiver.consume(getReader(), getProcessor());
+      controller.retrySuccess();
+      LOG.infof("Started consuming queue %s with consumer tag %s", controller.queueName(), consumerTag);
+    } catch (RuntimeException e) {
+      consumerTag = null;
+      controller.retryPending();
+      receiver.close();
+      LOG.warnf(e, "Failed to start RabbitMQ consumer for queue %s; retrying in %d seconds",
+          controller.queueName(), receiver.retryDelaySeconds());
+      receiver.scheduleStartRetry();
+    }
+    return status();
+  }
+
   @Override
   public synchronized BatchStatus start() {
     if (state.get() == BatchServiceState.started || state.get() == BatchServiceState.starting) {
@@ -166,41 +214,27 @@ public abstract class AbstractBatchService implements BatchService {
     }
 
     state.set(BatchServiceState.starting);
-    receiver.open(queueName());
-    try {
-      consumerTag = receiver.consume(getReader(), getProcessor(), tag -> {
-        state.set(BatchServiceState.stopped);
-        LOG.infof("Consumer for queue %s was cancelled by the broker", queueName());
-      });
-      state.set(BatchServiceState.started);
-      LOG.infof("Started consuming queue %s with consumer tag %s", queueName(), consumerTag);
-    } catch (RuntimeException e) {
-      state.set(BatchServiceState.stopped);
-      throw e;
-    }
-    return status();
+    return attemptStart();
   }
 
   @Override
   public synchronized BatchStatus stop() {
-    if (state.get() != BatchServiceState.started) {
-      return status();
-    }
-
+    receiver.cancelStartRetry();
     state.set(BatchServiceState.stopping);
     receiver.cancel(consumerTag);
+    consumerTag = null;
+    receiver.close();
     state.set(BatchServiceState.stopped);
-    LOG.infof("Stopped consuming queue %s", queueName());
+    LOG.infof("Stopped consuming queue for service %s", getName());
     return status();
   }
 
   void onApplicationStart(@Observes StartupEvent event) {
-    receiver.open(queueName());
     start();
   }
 
   void onApplicationShutdown(@Observes ShutdownEvent event) {
     stop();
-    receiver.close();
+    receiver.shutdownRetrier();
   }
 }

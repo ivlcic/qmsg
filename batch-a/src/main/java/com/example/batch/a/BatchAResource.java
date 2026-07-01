@@ -9,7 +9,7 @@ import jakarta.ws.rs.core.MediaType;
 @Path("/batch-a/messages")
 @Consumes(MediaType.APPLICATION_JSON)
 @Produces(MediaType.APPLICATION_JSON)
-public class BatchAEmitResource implements BatchStatusResource {
+public class BatchAResource implements BatchStatusResource {
 
   @Inject
   BatchAService service;
