@@ -32,6 +32,12 @@ The framework is message-driven. Each batch service:
 - Quarkiverse RabbitMQ Client `3.3.0`
 - JAX-RS with Jackson
 
+## Code Organization
+
+- Use define-before-call ordering inside Java files: constructors, helper methods, nested classes, and lower-level operations should appear before methods that call them.
+- For fluent or delegating APIs, place the method that does the actual work before convenience methods that delegate to it.
+- Preserve this ordering when adding or refactoring framework classes.
+
 ## Core Framework
 
 ### Message Envelope
@@ -70,12 +76,30 @@ Public service methods:
 
 The interface also owns the fluent action-definition API:
 
+Use static imports for `BatchService.byDefault` and `BatchService.with`. `execute(...)` is not static; call it on the builder returned by `with(...)`.
+
 ```java
-byDefault(
-    with(MyPayload.class).execute(StepOne.class, StepTwo.class)
-).on(
-    "archive", with(MyPayload.class).execute(ArchiveStep.class)
-);
+package com.example.batch.a;
+
+import com.example.batch.a.steps.BatchACompleteStep;
+import com.example.batch.a.steps.BatchAReadPayloadStep;
+import com.example.batch.common.AbstractBatchService;
+
+import static com.example.batch.common.BatchService.byDefault;
+import static com.example.batch.common.BatchService.with;
+
+public class ExampleBatchService extends AbstractBatchService {
+  public ExampleBatchService() {
+    super(
+        byDefault(
+            with(BatchAData.class).execute(
+                BatchAReadPayloadStep.class,
+                BatchACompleteStep.class
+            )
+        )
+    );
+  }
+}
 ```
 
 ### Action Registry
@@ -125,7 +149,19 @@ Important implementation details:
 Steps implement:
 
 ```java
-void execute(BatchContext<P> context) throws Exception;
+package com.example.batch.a.steps;
+
+import com.example.batch.a.BatchAData;
+import com.example.batch.common.BatchContext;
+import com.example.batch.common.BatchStep;
+
+public class ExampleStep implements BatchStep<BatchAData> {
+  @Override
+  public void execute(BatchContext<BatchAData> context) throws Exception {
+    BatchAData payload = context.payload();
+    context.put("payloadId", payload.id());
+  }
+}
 ```
 
 Routing and ordering are intentionally external to step implementations. A step only operates on its typed `BatchContext`.
@@ -253,7 +289,19 @@ Throughput counters are incremented on successful action or step execution. Erro
 [BatchAService.java](batch-a/src/main/java/com/example/batch/a/BatchAService.java)
 
 ```java
-public BatchAService() {
+package com.example.batch.a;
+
+import com.example.batch.a.steps.BatchACompleteStep;
+import com.example.batch.a.steps.BatchAReadPayloadStep;
+import com.example.batch.common.AbstractBatchService;
+import jakarta.enterprise.context.ApplicationScoped;
+
+import static com.example.batch.common.BatchService.byDefault;
+import static com.example.batch.common.BatchService.with;
+
+@ApplicationScoped
+public class BatchAService extends AbstractBatchService {
+  public BatchAService() {
     super(
         byDefault(
             with(BatchAData.class).execute(
@@ -262,6 +310,7 @@ public BatchAService() {
             )
         )
     );
+  }
 }
 ```
 
