@@ -77,10 +77,7 @@ public abstract class AbstractBatchService implements BatchService {
   }
 
   protected <M extends Message<P>, P> Message.Processor<M, P> getProcessor() {
-    return message -> {
-      BatchContext<P> context = new BatchContext<>(message.getAction(), message.getPayload(), null, null);
-      return execute(context);
-    };
+    return message -> execute(new BatchContext<>(message.getAction(), message.getPayload()));
   }
 
   protected <M extends Message<P>, P> Message.Reader<M, P> getReader() {
@@ -151,13 +148,9 @@ public abstract class AbstractBatchService implements BatchService {
     return true;
   }
 
-  public <P> boolean execute(String requestedAction, P payload, byte[] rawBody) throws Exception {
-    BatchContext<P> context = new BatchContext<>(requestedAction, payload, rawBody, null);
-    return execute(context);
-  }
-
   public <P> boolean execute(String requestedAction, P payload) throws Exception {
-    return execute(requestedAction, payload, null);
+    BatchContext<P> context = new BatchContext<>(requestedAction, payload);
+    return execute(context);
   }
 
   void onApplicationShutdown(@Observes ShutdownEvent event) {

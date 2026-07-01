@@ -1,27 +1,19 @@
 package com.example.batch.common;
 
-import com.rabbitmq.client.AMQP;
-
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Optional;
 
 public class BatchContext<P> {
   private final String action;
   private final P payload;
-  private final byte[] rawBody;
-  private final AMQP.BasicProperties properties;
-  private final Instant receivedAt;
+  private final Instant created;
   private final Map<String, Object> attributes = new HashMap<>();
 
-  public BatchContext(String action, P payload, byte[] rawBody, AMQP.BasicProperties properties) {
+  public BatchContext(String action, P payload) {
     this.action = action;
     this.payload = payload;
-    this.rawBody = rawBody;
-    this.properties = properties;
-    this.receivedAt = Instant.now();
+    this.created = Instant.now();
   }
 
   public String action() {
@@ -32,20 +24,8 @@ public class BatchContext<P> {
     return payload;
   }
 
-  public Optional<byte[]> rawBody() {
-    return Optional.of(rawBody);
-  }
-
-  public String rawBodyAsString() {
-    return rawBody != null ? new String(rawBody, StandardCharsets.UTF_8) : null;
-  }
-
-  public AMQP.BasicProperties properties() {
-    return properties;
-  }
-
-  public Instant receivedAt() {
-    return receivedAt;
+  public Instant created() {
+    return created;
   }
 
   public Map<String, Object> attributes() {

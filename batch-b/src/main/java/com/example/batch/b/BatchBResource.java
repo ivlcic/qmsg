@@ -6,8 +6,6 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 
-import java.util.Optional;
-
 @Path("/batch-b")
 @Consumes(MediaType.APPLICATION_JSON)
 @Produces(MediaType.APPLICATION_JSON)
@@ -31,7 +29,7 @@ public class BatchBResource implements BatchStatusResource {
 
   @POST
   public void sync(@QueryParam("action") String action, BatchBData1 payload) throws Exception {
-    service.execute(action, payload, Optional.empty());
+    service.execute(action, payload);
   }
 
   @POST
@@ -41,6 +39,6 @@ public class BatchBResource implements BatchStatusResource {
 
   @POST
   public void sync(@QueryParam("action") String action, BatchBData2 payload) throws Exception {
-    service.execute(action, payload, Optional.empty());
+    service.execute(action, payload);
   }
 }
