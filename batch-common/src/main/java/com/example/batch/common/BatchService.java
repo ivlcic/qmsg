@@ -65,6 +65,8 @@ public interface BatchService {
 
   BatchStatus start();
 
+  <P> boolean execute(BatchContext<P> context) throws Exception;
+
   BatchStatus stop();
 
   BatchStatus status();

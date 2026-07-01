@@ -11,12 +11,12 @@ import java.util.Optional;
 public class BatchContext<P> {
   private final String action;
   private final P payload;
-  private final Optional<byte[]> rawBody;
+  private final byte[] rawBody;
   private final AMQP.BasicProperties properties;
   private final Instant receivedAt;
   private final Map<String, Object> attributes = new HashMap<>();
 
-  public BatchContext(String action, P payload, Optional<byte[]> rawBody, AMQP.BasicProperties properties) {
+  public BatchContext(String action, P payload, byte[] rawBody, AMQP.BasicProperties properties) {
     this.action = action;
     this.payload = payload;
     this.rawBody = rawBody;
@@ -33,13 +33,11 @@ public class BatchContext<P> {
   }
 
   public Optional<byte[]> rawBody() {
-    return rawBody;
+    return Optional.of(rawBody);
   }
 
   public String rawBodyAsString() {
-    return rawBody
-        .map(bytes -> new String(bytes, StandardCharsets.UTF_8))
-        .orElse(null);
+    return rawBody != null ? new String(rawBody, StandardCharsets.UTF_8) : null;
   }
 
   public AMQP.BasicProperties properties() {

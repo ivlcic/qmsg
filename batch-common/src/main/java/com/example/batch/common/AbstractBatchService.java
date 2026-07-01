@@ -10,7 +10,6 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public abstract class AbstractBatchService implements BatchService {
@@ -78,7 +77,10 @@ public abstract class AbstractBatchService implements BatchService {
   }
 
   protected <M extends Message<P>, P> Message.Processor<M, P> getProcessor() {
-    return message -> execute(message.getAction(), message.getPayload(), Optional.empty());
+    return message -> {
+      BatchContext<P> context = new BatchContext<>(message.getAction(), message.getPayload(), null, null);
+      return execute(context);
+    };
   }
 
   protected <M extends Message<P>, P> Message.Reader<M, P> getReader() {
@@ -132,21 +134,30 @@ public abstract class AbstractBatchService implements BatchService {
     return status();
   }
 
-  public <P> boolean execute(String requestedAction, P payload, Optional<byte[]> rawBody) throws Exception {
-    String actionName = normalizeAction(requestedAction);
-    Action<?> configuredAction = actions.get(actionName);
-    if (configuredAction == null || configuredAction.isEmpty()) {
+
+  public <P> boolean execute(BatchContext<P> context) throws Exception {
+    String actionName = normalizeAction(context.action());
+    Action<?> targetAction = actions.get(actionName);
+    if (targetAction == null || targetAction.isEmpty()) {
       throw new RuntimeException(
           "No steps found for action [" + actionName + "] in [" + getName() + "] service!"
       );
     }
-    BatchContext<P> context = new BatchContext<>(actionName, payload, rawBody, null);
     @SuppressWarnings("unchecked")
-    Action<P> action = (Action<P>) configuredAction;
-    for (BatchStep<P> step : action) {
+    Action<P> a = (Action<P>) targetAction;
+    for (BatchStep<P> step : a) {
       step.execute(context);
     }
     return true;
+  }
+
+  public <P> boolean execute(String requestedAction, P payload, byte[] rawBody) throws Exception {
+    BatchContext<P> context = new BatchContext<>(requestedAction, payload, rawBody, null);
+    return execute(context);
+  }
+
+  public <P> boolean execute(String requestedAction, P payload) throws Exception {
+    return execute(requestedAction, payload, null);
   }
 
   void onApplicationShutdown(@Observes ShutdownEvent event) {
