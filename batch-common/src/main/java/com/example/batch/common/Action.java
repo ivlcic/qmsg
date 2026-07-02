@@ -1,10 +1,16 @@
 package com.example.batch.common;
 
+import lombok.Getter;
+
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 
+/**
+ * @author Nikola Ivačič <nikola.ivacic@dropchop.com> on 30. 06. 2026.
+ */
+@Getter
 public class Action<P> implements Iterable<BatchStep<P>> {
   private final String name;
   private final Class<P> payloadType;
@@ -30,18 +36,6 @@ public class Action<P> implements Iterable<BatchStep<P>> {
     this(name, definition.payloadType(), definition.stepTypes());
   }
 
-  public String name() {
-    return name;
-  }
-
-  public Class<P> payloadType() {
-    return payloadType;
-  }
-
-  public List<Class<? extends BatchStep<P>>> stepTypes() {
-    return stepTypes;
-  }
-
   void addStep(BatchStep<P> step) {
     steps.add(step);
   }
@@ -51,6 +45,7 @@ public class Action<P> implements Iterable<BatchStep<P>> {
   }
 
   @Override
+  @SuppressWarnings("NullableProblems")
   public Iterator<BatchStep<P>> iterator() {
     return steps.iterator();
   }

@@ -4,6 +4,9 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 
+/**
+ * @author Nikola Ivačič <nikola.ivacic@dropchop.com> on 30. 06. 2026.
+ */
 public interface BatchService {
   String DEFAULT_ACTION = "<<default>>";
 

@@ -1,7 +1,14 @@
 package com.example.batch.common;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import lombok.Getter;
+import lombok.Setter;
 
+/**
+ * @author Nikola Ivačič <nikola.ivacic@dropchop.com> on 29. 06. 2026.
+ */
+@Getter
+@Setter
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class Message<P> {
 
@@ -34,21 +41,5 @@ public class Message<P> {
   private P payload;
 
   public Message() {
-  }
-
-  public String getAction() {
-    return action;
-  }
-
-  public void setAction(String action) {
-    this.action = action;
-  }
-
-  public P getPayload() {
-    return payload;
-  }
-
-  public void setPayload(P payload) {
-    this.payload = payload;
   }
 }

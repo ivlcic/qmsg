@@ -5,7 +5,12 @@ import com.example.batch.common.Message;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
+import lombok.Getter;
 
+/**
+ * @author Nikola Ivačič <nikola.ivacic@dropchop.com> on 29. 06. 2026.
+ */
+@Getter
 @Path("/batch-a/messages")
 @Consumes(MediaType.APPLICATION_JSON)
 @Produces(MediaType.APPLICATION_JSON)
@@ -13,10 +18,6 @@ public class BatchAResource implements BatchStatusResource {
 
   @Inject
   BatchAService service;
-
-  public BatchAService getService() {
-    return service;
-  }
 
   @POST
   public Message<BatchAData> send(@QueryParam("action") String action, BatchAData payload) throws Exception {

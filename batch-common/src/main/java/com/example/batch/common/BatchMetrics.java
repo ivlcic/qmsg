@@ -4,6 +4,9 @@ import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+/**
+ * @author Nikola Ivačič <nikola.ivacic@dropchop.com> on 01. 07. 2026.
+ */
 @ApplicationScoped
 public class BatchMetrics {
   private static final String ALL = "_all";

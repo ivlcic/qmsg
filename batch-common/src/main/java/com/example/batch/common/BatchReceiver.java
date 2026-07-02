@@ -1,16 +1,10 @@
 package com.example.batch.common;
 
-import com.rabbitmq.client.Channel;
-import com.rabbitmq.client.Connection;
-import com.rabbitmq.client.ConsumerShutdownSignalCallback;
-import com.rabbitmq.client.Delivery;
-import com.rabbitmq.client.Recoverable;
-import com.rabbitmq.client.RecoveryListener;
-import com.rabbitmq.client.ShutdownSignalException;
+import com.rabbitmq.client.*;
 import io.quarkiverse.rabbitmqclient.RabbitMQClient;
 import jakarta.enterprise.context.Dependent;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -19,10 +13,13 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * @author Nikola Ivačič <nikola.ivacic@dropchop.com> on 29. 06. 2026.
+ */
+@Slf4j
 @Dependent
 public class BatchReceiver implements AutoCloseable {
   private static final long START_RETRY_DELAY_SECONDS = 5;
-  private static final Logger LOG = Logger.getLogger(BatchReceiver.class);
 
   public interface Controller {
     String queueName();
@@ -68,7 +65,7 @@ public class BatchReceiver implements AutoCloseable {
       return;
     }
     controller.retryPending();
-    LOG.warnf("RabbitMQ receiver for queue %s is unavailable: %s", controller.queueName(), reason);
+    log.warn("RabbitMQ receiver for queue [{}] is unavailable: [{}]", controller.queueName(), reason);
     if (!(connection instanceof Recoverable && channel instanceof Recoverable)) {
       scheduleStartRetry();
     }
@@ -79,7 +76,7 @@ public class BatchReceiver implements AutoCloseable {
       return;
     }
     controller.retrySuccess();
-    LOG.infof("RabbitMQ receiver for queue %s recovered", controller.queueName());
+    log.info("RabbitMQ receiver for queue [{}] recovered", controller.queueName());
   }
 
   private synchronized void consumerCancelled(String consumerTag) {
@@ -88,7 +85,7 @@ public class BatchReceiver implements AutoCloseable {
       return;
     }
     controller.retryPending();
-    LOG.warnf("Consumer %s for queue %s was cancelled by the broker", consumerTag, controller.queueName());
+    log.warn("Consumer [{}] for queue [{}] was cancelled by the broker", consumerTag, controller.queueName());
     scheduleStartRetry();
   }
 
@@ -137,10 +134,10 @@ public class BatchReceiver implements AutoCloseable {
       try {
         ack = processor.process(msg);
       } catch (Exception e) {
-        LOG.errorf(e, "Message processor failed for queue %s", controller.queueName());
+        log.error("Message processor failed for queue [{}]", controller.queueName(), e);
       }
     } catch (Exception e) {
-      LOG.errorf(e, "Message reader failed for queue %s", controller.queueName());
+      log.error("Message reader failed for queue [{}]", controller.queueName(), e);
     }
 
     if (ack) {
@@ -201,7 +198,7 @@ public class BatchReceiver implements AutoCloseable {
         connection.close();
       }
     } catch (Exception e) {
-      LOG.warnf(e, "Failed to close receiver for queue %s", controller.queueName());
+      log.warn("Failed to close receiver for queue [{}]!", controller.queueName(), e);
     } finally {
       channel = null;
       connection = null;

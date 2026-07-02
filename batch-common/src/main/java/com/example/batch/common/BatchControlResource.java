@@ -4,6 +4,9 @@ import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 
+/**
+ * @author Nikola Ivačič <nikola.ivacic@dropchop.com> on 01. 07. 2026.
+ */
 public interface BatchControlResource extends BatchResource {
 
   @POST

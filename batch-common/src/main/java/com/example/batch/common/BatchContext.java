@@ -1,9 +1,15 @@
 package com.example.batch.common;
 
+import lombok.Getter;
+
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 
+/**
+ * @author Nikola Ivačič <nikola.ivacic@dropchop.com> on 29. 06. 2026.
+ */
+@Getter
 public class BatchContext<P> {
   private final String action;
   private final P payload;
@@ -16,22 +22,6 @@ public class BatchContext<P> {
     this.created = Instant.now();
   }
 
-  public String action() {
-    return action;
-  }
-
-  public P payload() {
-    return payload;
-  }
-
-  public Instant created() {
-    return created;
-  }
-
-  public Map<String, Object> attributes() {
-    return attributes;
-  }
-
   public void put(String key, Object value) {
     attributes.put(key, value);
   }
@@ -42,6 +32,11 @@ public class BatchContext<P> {
     if (value == null) {
       return null;
     }
-    return (T) value;
+    if (type != null && type.isInstance(value)) {
+      return (T) value;
+    }
+    throw new IllegalArgumentException(
+        "Wrong attribute value [" + key + "] type [" + value.getClass() + "] for [" + type + "]"
+    );
   }
 }

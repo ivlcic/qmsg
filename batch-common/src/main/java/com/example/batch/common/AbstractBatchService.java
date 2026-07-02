@@ -6,15 +6,18 @@ import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.event.Observes;
+import jakarta.enterprise.context.control.RequestContextController;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
+import lombok.extern.slf4j.Slf4j;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
+/**
+ * @author Nikola Ivačič <nikola.ivacic@dropchop.com> on 29. 06. 2026.
+ */
+@Slf4j
 public abstract class AbstractBatchService implements BatchService {
-  private static final Logger LOG = Logger.getLogger(AbstractBatchService.class);
-
   @Inject
   BatchReceiver receiver;
 
@@ -26,6 +29,9 @@ public abstract class AbstractBatchService implements BatchService {
 
   @Inject
   BatchEmitter batchEmitter;
+
+  @Inject
+  RequestContextController requestContextController;
 
   @Inject
   @All
@@ -104,7 +110,7 @@ public abstract class AbstractBatchService implements BatchService {
   }
 
   private <P> void initializeAction(Action<P> action) {
-    for (Class<? extends BatchStep<P>> stepType : action.stepTypes()) {
+    for (Class<? extends BatchStep<P>> stepType : action.getStepTypes()) {
       action.addStep(resolveStep(stepType));
     }
   }
@@ -131,20 +137,10 @@ public abstract class AbstractBatchService implements BatchService {
     return emitter;
   }
 
-  public <P> boolean execute(BatchContext<P> context) throws Exception {
-    String actionName = normalizeAction(context.action());
-    Action<?> targetAction = actions.get(actionName);
-    if (targetAction == null || targetAction.isEmpty()) {
-      metrics.recordExecutionError(actionName);
-      throw new RuntimeException(
-          "No steps found for action [" + actionName + "] in [" + getName() + "] service!"
-      );
-    }
-    @SuppressWarnings("unchecked")
-    Action<P> a = (Action<P>) targetAction;
+  private <P> boolean executeSteps(Action<P> action, String actionName, BatchContext<P> context) throws Exception {
     int stepIndex = 0;
-    for (BatchStep<P> step : a) {
-      String stepName = a.stepTypes().get(stepIndex).getSimpleName();
+    for (BatchStep<P> step : action) {
+      String stepName = action.getStepTypes().get(stepIndex).getSimpleName();
       try {
         step.execute(context);
         metrics.recordStep(actionName, stepName);
@@ -157,6 +153,31 @@ public abstract class AbstractBatchService implements BatchService {
     }
     metrics.recordExecution(actionName);
     return true;
+  }
+
+  private <P> boolean executeInRequestContext(Action<P> action, String actionName, BatchContext<P> context) throws Exception {
+    boolean activated = requestContextController.activate();
+    try {
+      return executeSteps(action, actionName, context);
+    } finally {
+      if (activated) {
+        requestContextController.deactivate();
+      }
+    }
+  }
+
+  public <P> boolean execute(BatchContext<P> context) throws Exception {
+    String actionName = normalizeAction(context.getAction());
+    Action<?> targetAction = actions.get(actionName);
+    if (targetAction == null || targetAction.isEmpty()) {
+      metrics.recordExecutionError(actionName);
+      throw new RuntimeException(
+          "No steps found for action [" + actionName + "] in [" + getName() + "] service!"
+      );
+    }
+    @SuppressWarnings("unchecked")
+    Action<P> a = (Action<P>) targetAction;
+    return executeInRequestContext(a, actionName, context);
   }
 
   public <P> boolean execute(String requestedAction, P payload) throws Exception {
@@ -175,7 +196,7 @@ public abstract class AbstractBatchService implements BatchService {
         //noinspection unchecked
         return (M)nodeDeserializer.deserialize(body);
       } catch (Exception e) {
-        LOG.errorf(e, "Failed to process message from queue for service [%s]!", getName());
+        log.error("Failed to process message from queue for service [{}]!", getName(), e);
         return null;
       }
     };
@@ -195,13 +216,15 @@ public abstract class AbstractBatchService implements BatchService {
       receiver.open(controller);
       consumerTag = receiver.consume(getReader(), getProcessor());
       controller.retrySuccess();
-      LOG.infof("Started consuming queue %s with consumer tag %s", controller.queueName(), consumerTag);
+      log.info("Started consuming queue [{}] with consumer tag [{}]", controller.queueName(), consumerTag);
     } catch (RuntimeException e) {
       consumerTag = null;
       controller.retryPending();
       receiver.close();
-      LOG.warnf(e, "Failed to start RabbitMQ consumer for queue %s; retrying in %d seconds",
-          controller.queueName(), receiver.retryDelaySeconds());
+      log.warn(
+          "Failed to start RabbitMQ consumer for queue [{}]; retrying in [{}] seconds",
+          controller.queueName(), receiver.retryDelaySeconds(), e
+      );
       receiver.scheduleStartRetry();
     }
     return status();
@@ -225,7 +248,7 @@ public abstract class AbstractBatchService implements BatchService {
     consumerTag = null;
     receiver.close();
     state.set(BatchServiceState.stopped);
-    LOG.infof("Stopped consuming queue for service %s", getName());
+    log.info("Stopped consuming queue for service [{}]", getName());
     return status();
   }
 

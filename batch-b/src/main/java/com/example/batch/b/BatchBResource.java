@@ -5,7 +5,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
+import lombok.Getter;
 
+/**
+ * @author Nikola Ivačič <nikola.ivacic@dropchop.com> on 01. 07. 2026.
+ */
+@Getter
 @Path("/batch-b")
 @Consumes(MediaType.APPLICATION_JSON)
 @Produces(MediaType.APPLICATION_JSON)
@@ -16,11 +21,6 @@ public class BatchBResource implements BatchStatusResource {
 
   @Inject
   ObjectMapper objectMapper;
-
-  @Override
-  public BatchBService getService() {
-    return service;
-  }
 
   @POST
   @Path("/exec_async")

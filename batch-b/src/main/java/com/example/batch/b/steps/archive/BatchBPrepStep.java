@@ -4,14 +4,17 @@ import com.example.batch.b.BatchBData1;
 import com.example.batch.common.BatchContext;
 import com.example.batch.common.BatchStep;
 import jakarta.enterprise.context.Dependent;
-import org.jboss.logging.Logger;
+import lombok.extern.slf4j.Slf4j;
 
+/**
+ * @author Nikola Ivačič <nikola.ivacic@dropchop.com> on 01. 07. 2026.
+ */
+@Slf4j
 @Dependent
 public class BatchBPrepStep implements BatchStep<BatchBData1> {
-  private static final Logger LOG = Logger.getLogger(BatchBPrepStep.class);
 
   @Override
   public void execute(BatchContext<BatchBData1> context) {
-    LOG.infof("BatchB archive prep payload id=%s", context.payload().id());
+    log.info("BatchB prep payload id=[{}]", context.getPayload().id());
   }
 }

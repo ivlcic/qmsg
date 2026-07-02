@@ -10,6 +10,9 @@ import jakarta.inject.Inject;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 
+/**
+ * @author Nikola Ivačič <nikola.ivacic@dropchop.com> on 29. 06. 2026.
+ */
 @ApplicationScoped
 public class BatchEmitter {
   @Inject
@@ -42,14 +45,14 @@ public class BatchEmitter {
           .build();
     }
 
-    private Message.Writer emitter(Channel channel) {
+    private Message.Writer writer(Channel channel) {
       return body -> channel.basicPublish("", queueName(), properties(), body);
     }
 
     public <P> void emit(Message<P> message, Message.Serializer serializer) {
       try (Connection connection = rabbitMQClient.connect(); Channel channel = connection.createChannel()) {
         channel.queueDeclare(queueName(), true, false, false, null);
-        emitter(channel).write(serializer.serialize(message));
+        writer(channel).write(serializer.serialize(message));
       } catch (IOException e) {
         throw new UncheckedIOException(e);
       } catch (Exception e) {
