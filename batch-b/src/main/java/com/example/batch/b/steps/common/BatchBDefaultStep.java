@@ -6,6 +6,8 @@ import com.example.batch.common.BatchStep;
 import jakarta.enterprise.context.Dependent;
 import lombok.extern.slf4j.Slf4j;
 
+import static com.example.batch.common.BatchStep.proceed;
+
 /**
  * @author Nikola Ivačič <nikola.ivacic@dropchop.com> on 29. 06. 2026.
  */
@@ -14,11 +16,12 @@ import lombok.extern.slf4j.Slf4j;
 public class BatchBDefaultStep implements BatchStep<BatchBData1> {
 
   @Override
-  public void execute(BatchContext<BatchBData1> context) {
+  public Result execute(BatchContext<BatchBData1> context) {
     BatchBData1 payload = context.getPayload();
     log.info(
         "BatchB processed default action id=[{}] category=[{}] active=[{}]",
         payload.id(), payload.category(), payload.active()
     );
+    return proceed();
   }
 }

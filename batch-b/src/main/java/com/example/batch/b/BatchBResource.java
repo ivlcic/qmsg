@@ -1,5 +1,6 @@
 package com.example.batch.b;
 
+import com.dropchop.recyclone.base.api.model.utils.Uuid;
 import com.example.batch.common.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.inject.Inject;
@@ -37,6 +38,6 @@ public class BatchBResource implements BatchStatusResource {
   @POST
   @Path("/exec/{action : \\w{3,}}")
   public void sync(@PathParam("action") String action, BatchBData2 payload) throws Exception {
-    service.execute(action, payload);
+    service.execute(action, Uuid.getTimeBased().toString(), payload);
   }
 }

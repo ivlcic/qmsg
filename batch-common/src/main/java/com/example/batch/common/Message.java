@@ -37,6 +37,7 @@ public class Message<P> {
     Message<P> deserialize(byte[] body) throws Exception;
   }
 
+  private String id;
   private String action;
   private P payload;
 
