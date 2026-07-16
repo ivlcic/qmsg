@@ -274,6 +274,11 @@ public abstract class AbstractBatchService implements BatchService {
   }
 
   private synchronized BatchStatus attemptStart() {
+    // A fallback retry can race automatic connection recovery; if recovery already restored the
+    // consumer, registering another one with the same tag would fail and kill the channel.
+    if (state.get() == BatchServiceState.started && consumerTag != null && receiver.isOpen()) {
+      return status();
+    }
     BatchReceiver.Controller controller = new ReceiverRetryController();
     try {
       receiver.open(controller);
@@ -320,7 +325,13 @@ public abstract class AbstractBatchService implements BatchService {
   }
 
   void onApplicationShutdown(@Observes ShutdownEvent event) {
-    stop();
-    receiver.shutdownRetrier();
+    try {
+      stop();
+    } finally {
+      receiver.shutdownRetrier();
+      if (emitter != null) {
+        emitter.close();
+      }
+    }
   }
 }

@@ -66,15 +66,17 @@ public class BatchReceiver implements AutoCloseable {
     }
     controller.retryPending();
     log.warn("RabbitMQ receiver for queue [{}] is unavailable: [{}]", controller.queueName(), reason);
-    if (!(connection instanceof Recoverable && channel instanceof Recoverable)) {
-      scheduleStartRetry();
-    }
+    // Automatic recovery only covers connection-level failures; channel-level errors and abandoned
+    // recovery leave the consumer dead, so a fallback retry is always scheduled. If automatic
+    // recovery wins the race, recovered() cancels it and attemptStart() skips a live consumer.
+    scheduleStartRetry();
   }
 
   private synchronized void recovered() {
     if (controller.isRetryForbidden()) {
       return;
     }
+    cancelStartRetry();
     controller.retrySuccess();
     log.info("RabbitMQ receiver for queue [{}] recovered", controller.queueName());
   }
@@ -125,25 +127,39 @@ public class BatchReceiver implements AutoCloseable {
   }
 
   private <M extends Message<P>, P> void handleDelivery(
-      Delivery delivery, Message.Reader<M, P> reader, Message.Processor<M, P> processor) throws IOException {
+      Delivery delivery, Message.Reader<M, P> reader, Message.Processor<M, P> processor) {
     long deliveryTag = delivery.getEnvelope().getDeliveryTag();
     boolean ack = false;
-    M msg;
+    boolean requeue = true;
+    M msg = null;
     try {
       msg = reader.read(delivery.getBody());
+    } catch (Exception e) {
+      log.error("Message reader failed for queue [{}]", controller.queueName(), e);
+    }
+    if (msg == null) {
+      // An unreadable message can never succeed; requeueing it would redeliver it immediately
+      // (basicQos(1)) and spin the consumer forever while blocking the rest of the queue.
+      log.error("Discarding unreadable message from queue [{}]", controller.queueName());
+      requeue = false;
+    } else {
       try {
         ack = processor.process(msg);
       } catch (Exception e) {
         log.error("Message processor failed for queue [{}]", controller.queueName(), e);
       }
-    } catch (Exception e) {
-      log.error("Message reader failed for queue [{}]", controller.queueName(), e);
     }
 
-    if (ack) {
-      channel.basicAck(deliveryTag, false);
-    } else {
-      channel.basicNack(deliveryTag, false, true);
+    try {
+      if (ack) {
+        channel.basicAck(deliveryTag, false);
+      } else {
+        channel.basicNack(deliveryTag, false, requeue);
+      }
+    } catch (Exception e) {
+      // The channel died between delivery and (n)ack; the unacked message will be redelivered
+      // after recovery, and the shutdown listeners drive the reconnect.
+      log.warn("Failed to ack/nack delivery [{}] for queue [{}]", deliveryTag, controller.queueName(), e);
     }
   }
 
@@ -158,14 +174,13 @@ public class BatchReceiver implements AutoCloseable {
     if (retryTask != null && !retryTask.isDone()) {
       return;
     }
-    if (retryExecutor != null && !retryExecutor.isShutdown()) {
-      return;
+    if (retryExecutor == null || retryExecutor.isShutdown()) {
+      retryExecutor = Executors.newSingleThreadScheduledExecutor(task -> {
+        Thread thread = new Thread(task, controller.queueName() + "-rabbitmq-start-retry");
+        thread.setDaemon(true);
+        return thread;
+      });
     }
-    retryExecutor = Executors.newSingleThreadScheduledExecutor(task -> {
-      Thread thread = new Thread(task, controller.queueName() + "-rabbitmq-start-retry");
-      thread.setDaemon(true);
-      return thread;
-    });
     retryTask = retryExecutor.schedule(this::retryStart, START_RETRY_DELAY_SECONDS, TimeUnit.SECONDS);
   }
 
@@ -260,8 +275,10 @@ public class BatchReceiver implements AutoCloseable {
 
     try {
       channel.basicCancel(consumerTag);
-    } catch (IOException e) {
-      throw new UncheckedIOException(e);
+    } catch (Exception e) {
+      // Best effort: cancel is only called on the stop/shutdown path, which must proceed to
+      // close() and shutdownRetrier() even when the channel is already broken.
+      log.warn("Failed to cancel consumer [{}] for queue [{}]", consumerTag, controller.queueName(), e);
     }
   }
 }
