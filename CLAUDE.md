@@ -23,7 +23,7 @@ mvn -pl batch-a -am -Dmaven.repo.local=.m2/repository quarkus:dev
 mvn -pl batch-b -am -Dmaven.repo.local=.m2/repository quarkus:dev
 ```
 
-There are no tests yet. When they exist: `mvn test`, single test via `mvn -pl <module> test -Dtest=ClassName#methodName`.
+Unit tests live in `batch-common/src/test/java` (plain JUnit 5, no CDI container or broker needed). Run with `mvn test`, single test via `mvn -pl <module> test -Dtest=ClassName#methodName`.
 
 ## Architecture
 
