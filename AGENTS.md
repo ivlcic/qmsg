@@ -246,7 +246,7 @@ Throughput counters are incremented on successful action or step execution. Erro
 
 [BatchResource.java](batch-common/src/main/java/com/example/batch/common/BatchResource.java)
 [BatchStatusResource.java](batch-common/src/main/java/com/example/batch/common/BatchStatusResource.java)
-[AbstractBatchControlResource.java](batch-common/src/main/java/com/example/batch/common/AbstractBatchControlResource.java)
+[BatchControlResource.java](batch-common/src/main/java/com/example/batch/common/BatchControlResource.java)
 
 `BatchStatusResource` adds:
 
@@ -256,7 +256,7 @@ Throughput counters are incremented on successful action or step execution. Erro
 
 `readyz` returns `200 OK` only when state is `started`; otherwise it returns `503 Service Unavailable` with the current `BatchStatus` body.
 
-`AbstractBatchControlResource` is still available for concrete resources that want:
+`BatchControlResource` is still available for concrete resources that want:
 
 - `POST /start`
 - `POST /stop`
@@ -329,7 +329,7 @@ public class BatchAService extends AbstractBatchService {
 
 ### REST Resource
 
-[BatchAEmitResource.java](batch-a/src/main/java/com/example/batch/a/BatchAEmitResource.java)
+[BatchAResource.java](batch-a/src/main/java/com/example/batch/a/BatchAResource.java)
 
 - `POST /batch-a/messages?action=archive-or-null`
 - `GET /batch-a/messages/status`
@@ -408,12 +408,14 @@ Both current sample records use:
 
 [BatchBResource.java](batch-b/src/main/java/com/example/batch/b/BatchBResource.java)
 
-- base path: `POST /batch-b`
+- async emit, default action: `POST /batch-b/exec_async` with a `BatchBData1` body
+- async emit, explicit action: `POST /batch-b/exec_async/{action}` with a `BatchBData1` body
+- sync execution: `POST /batch-b/exec/{action}` with a `BatchBData2` body, via `service.execute(action, requestId, payload)`
 - status path: `GET /batch-b/status`
 - health path: `GET /batch-b/healtz`
 - readiness path: `GET /batch-b/readyz`
-- exposes async emit methods through `service.emit(...)`
-- exposes sync execution methods through `service.execute(...)`
+
+Async endpoints publish through `service.emit(...)` with an explicit `DefaultSerializer`. The `{action}` path parameter requires at least three word characters (`\w{3,}`).
 
 ## How To Add A New Batch Service
 
@@ -425,7 +427,7 @@ Both current sample records use:
 6. Add a JAX-RS resource that injects the concrete service.
 7. For async behavior, accept the raw payload and call `service.emit(action, payload, serializer)`.
 8. For sync behavior, create or pass a `BatchContext` and call `service.execute(...)`.
-9. Implement `BatchStatusResource` or extend `AbstractBatchControlResource` if HTTP status/start/stop endpoints are needed.
+9. Implement `BatchStatusResource` or `BatchControlResource` if HTTP status/start/stop endpoints are needed.
 10. Add Quarkus YAML config for HTTP and RabbitMQ settings.
 
 ## Example Requests
@@ -465,9 +467,17 @@ curl http://localhost:8081/batch-b/status
 Publish to Batch B archive action:
 
 ```bash
-curl -X POST 'http://localhost:8081/batch-b?action=archive' \
+curl -X POST 'http://localhost:8081/batch-b/exec_async/archive' \
   -H 'Content-Type: application/json' \
   -d '{"id":"B-1","category":"ops","active":true}'
+```
+
+Execute Batch B delete action synchronously:
+
+```bash
+curl -X POST 'http://localhost:8081/batch-b/exec/delete' \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"B-2","category":"ops","active":false}'
 ```
 
 ## Build And Run
@@ -499,7 +509,6 @@ Prerequisites:
 
 - `BatchStatusResource` exposes status, healtz, and readyz only; concrete start/stop HTTP resources must extend or implement the control behavior explicitly.
 - The default async reader path depends on the current `DefaultDeserializer` implementation, so typed payload deserialization should be checked carefully when adding actions with different payload types.
-- `BatchBResource` currently overloads JAX-RS `POST` methods by Java payload type. That may need explicit subpaths or media-type separation if runtime endpoint selection becomes ambiguous.
 - On processing failure the message is requeued, so poison messages can loop indefinitely without a dead-letter strategy.
 
 ## Verification State
