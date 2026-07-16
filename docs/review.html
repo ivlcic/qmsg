@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Code Review — RabbitMQ Reliability</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1d21; --muted: #5c6570; --border: #d9dee3;
+    --code-bg: #f4f6f8; --accent: #0b6bcb;
+    --critical: #b3261e; --high: #c26100; --medium: #7a5900; --low: #2e6b34;
+    --fixed-bg: #e6f4ea; --fixed-fg: #1e6b34; --open-bg: #fdefe3; --open-fg: #9a4c00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181c; --fg: #e6e8ea; --muted: #9aa4ae; --border: #33383f;
+      --code-bg: #22262b; --accent: #6cb2f7;
+      --critical: #ff8a80; --high: #ffb74d; --medium: #ffe082; --low: #a5d6a7;
+      --fixed-bg: #1e3325; --fixed-fg: #a5d6a7; --open-bg: #3a2b18; --open-fg: #ffcc80;
+    }
+  }
+  body {
+    margin: 0 auto; max-width: 60rem; padding: 2rem 1.5rem 4rem;
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg); color: var(--fg);
+  }
+  h1 { font-size: 1.7rem; margin-bottom: .25rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.5rem; border-bottom: 1px solid var(--border); padding-bottom: .35rem; }
+  h3 { font-size: 1.05rem; margin-top: 1.8rem; }
+  .meta { color: var(--muted); font-size: .9rem; margin-bottom: 1.5rem; }
+  code, pre { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: .875em; }
+  code { background: var(--code-bg); padding: .1em .35em; border-radius: 4px; }
+  pre { background: var(--code-bg); padding: .8rem 1rem; border-radius: 8px; overflow-x: auto; line-height: 1.45; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .92rem; }
+  th, td { border: 1px solid var(--border); padding: .5rem .7rem; text-align: left; vertical-align: top; }
+  th { background: var(--code-bg); }
+  .sev { font-weight: 600; white-space: nowrap; }
+  .sev.critical { color: var(--critical); }
+  .sev.high { color: var(--high); }
+  .sev.medium { color: var(--medium); }
+  .sev.low { color: var(--low); }
+  .badge { display: inline-block; border-radius: 999px; padding: .05rem .6rem; font-size: .78rem; font-weight: 600; white-space: nowrap; }
+  .badge.fixed { background: var(--fixed-bg); color: var(--fixed-fg); }
+  .badge.open { background: var(--open-bg); color: var(--open-fg); }
+  .finding { border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.2rem; margin: 1.2rem 0; }
+  .finding h3 { margin-top: 0; }
+  .loc { color: var(--muted); font-size: .85rem; }
+  blockquote { border-left: 3px solid var(--accent); margin: 1rem 0; padding: .2rem 1rem; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>Code Review — RabbitMQ Reliability</h1>
+<p class="meta">
+  Repository: <code>qmsg</code> · Branch: <code>review/rabbitmq-reliability</code> · Date: 2026-07-16<br>
+  Focus: long-running service resilience — the service <strong>must</strong> reconnect and retry RabbitMQ connections indefinitely.
+</p>
+
+<h2>Summary</h2>
+<p>
+The framework has a sound recovery design on paper: it leans on the RabbitMQ Java client's automatic
+connection recovery and backs it with its own scheduled start-retry loop. In practice, the retry loop
+contained a bug that limited it to <strong>a single retry attempt ever</strong>, and the fallback was skipped
+in exactly the situations where automatic recovery cannot help (channel-level errors). Combined, a broker
+outage at startup, a broker error that closes the channel, or an abandoned recovery would leave the service
+permanently stuck in <code>starting</code> with no consumer — silently, for the rest of the process lifetime.
+The publisher side opened a new TCP connection per message and did not use publisher confirms.
+</p>
+<p>
+All eight findings below marked <span class="badge fixed">FIXED</span> are implemented on this branch and the
+build passes (<code>mvn clean install -Dmaven.test.skip=true</code>). Items marked
+<span class="badge open">RECOMMENDATION</span> are deliberate scope decisions left for a follow-up.
+</p>
+
+<table>
+  <tr><th>#</th><th>Severity</th><th>Finding</th><th>Status</th></tr>
+  <tr><td>1</td><td class="sev critical">Critical</td><td>Start retry fires at most once, ever</td><td><span class="badge fixed">FIXED</span></td></tr>
+  <tr><td>2</td><td class="sev critical">Critical</td><td>No reconnect path for channel-level failures</td><td><span class="badge fixed">FIXED</span></td></tr>
+  <tr><td>3</td><td class="sev critical">Critical</td><td>Duplicate-consumer race between retry and auto-recovery</td><td><span class="badge fixed">FIXED</span></td></tr>
+  <tr><td>4</td><td class="sev critical">Critical</td><td>Unreadable message causes infinite hot redelivery loop</td><td><span class="badge fixed">FIXED</span></td></tr>
+  <tr><td>5</td><td class="sev high">High</td><td>Emitter opens a new connection per message, no publisher confirms</td><td><span class="badge fixed">FIXED</span></td></tr>
+  <tr><td>6</td><td class="sev high">High</td><td><code>stop()</code>/shutdown aborts mid-way on a broken channel</td><td><span class="badge fixed">FIXED</span></td></tr>
+  <tr><td>7</td><td class="sev medium">Medium</td><td>ack/nack failure escapes the delivery callback</td><td><span class="badge fixed">FIXED</span></td></tr>
+  <tr><td>8</td><td class="sev medium">Medium</td><td>Emitted messages have no id — async trace correlation is lost</td><td><span class="badge fixed">FIXED</span></td></tr>
+  <tr><td>9</td><td class="sev high">High</td><td>No dead-letter strategy: parseable poison messages still loop</td><td><span class="badge open">RECOMMENDATION</span></td></tr>
+  <tr><td>10</td><td class="sev low">Low</td><td>Fixed 5s retry delay; no backoff</td><td><span class="badge open">RECOMMENDATION</span></td></tr>
+  <tr><td>11</td><td class="sev low">Low</td><td>RabbitMQ client settings left implicit in <code>application.yaml</code></td><td><span class="badge open">RECOMMENDATION</span></td></tr>
+  <tr><td>12</td><td class="sev low">Low</td><td>Recovery listeners registered twice (connection + channel)</td><td><span class="badge open">RECOMMENDATION</span></td></tr>
+</table>
+
+<h2>Findings and fixes</h2>
+
+<div class="finding">
+<h3>1. Start retry fires at most once, ever <span class="sev critical">· Critical</span> <span class="badge fixed">FIXED</span></h3>
+<p class="loc">BatchReceiver.scheduleStartRetry()</p>
+<p>
+The guard returned early whenever <code>retryExecutor</code> already existed:
+</p>
+<pre><code>if (retryExecutor != null && !retryExecutor.isShutdown()) {
+  return;   // executor exists after the FIRST retry and is never shut down between retries
+}</code></pre>
+<p>
+The executor is created on the first schedule and only torn down at application shutdown
+(<code>shutdownRetrier()</code>). So after the first retry attempt fired and failed, every subsequent
+<code>scheduleStartRetry()</code> call returned without scheduling anything. Concrete scenario: broker down
+at boot → <code>attemptStart()</code> fails → one retry after 5&nbsp;s → still down → no further retries →
+service stuck in <code>starting</code> until restarted, even when the broker comes back a minute later.
+</p>
+<p><strong>Fix:</strong> the condition now <em>reuses</em> the executor and only creates it when missing or shut
+down; the task is scheduled unconditionally afterwards. The retry loop now continues indefinitely (every 5&nbsp;s)
+until it succeeds or the service is stopped.</p>
+</div>
+
+<div class="finding">
+<h3>2. No reconnect path for channel-level failures <span class="sev critical">· Critical</span> <span class="badge fixed">FIXED</span></h3>
+<p class="loc">BatchReceiver.unavailable()</p>
+<pre><code>if (!(connection instanceof Recoverable && channel instanceof Recoverable)) {
+  scheduleStartRetry();   // skipped whenever automatic recovery is enabled — i.e. always
+}</code></pre>
+<p>
+With automatic recovery enabled (the default), the fallback retry was never scheduled — the code trusted
+automatic recovery completely. But the RabbitMQ Java client's automatic recovery only covers
+<em>connection-level</em> failures. A channel closed by a broker error (e.g. 404 after a queue is deleted,
+406 precondition failure) is <strong>never auto-recovered</strong>: the connection stays healthy, recovery never
+starts, and the consumer is dead. The shutdown listener fired, set the state to <code>starting</code>, and then
+nothing ever happened again — a silently dead long-running service.
+</p>
+<p><strong>Fix:</strong> <code>unavailable()</code> now always schedules the fallback retry. If automatic
+recovery wins the race, <code>recovered()</code> cancels the pending retry, and the new guard in
+<code>attemptStart()</code> (finding 3) makes a late-firing retry a no-op. The retry path itself handles a
+dead channel on a live connection correctly: <code>receiver.open()</code> sees <code>isOpen() == false</code>,
+closes the remnants, reconnects, redeclares the queue and re-registers the consumer.
+</p>
+</div>
+
+<div class="finding">
+<h3>3. Duplicate-consumer race between retry and auto-recovery <span class="sev critical">· Critical</span> <span class="badge fixed">FIXED</span></h3>
+<p class="loc">AbstractBatchService.attemptStart()</p>
+<p>
+<code>attemptStart()</code> unconditionally called <code>receiver.consume(...)</code>. If a scheduled retry fired
+after automatic recovery had already restored the consumer (topology recovery re-registers consumers under
+the <em>same</em> explicit consumer tag <code>queue.&lt;Service&gt;.consumer</code>), the second
+<code>basicConsume</code> with an already-used tag would fail with a channel error — killing the very channel
+that had just recovered. With finding 2 making fallback retries routine, this race had to be closed in the
+same change.
+</p>
+<p><strong>Fix:</strong> <code>attemptStart()</code> returns early when the service is already
+<code>started</code> with a live consumer (<code>consumerTag != null && receiver.isOpen()</code>), and
+<code>recovered()</code> additionally cancels any pending retry.</p>
+</div>
+
+<div class="finding">
+<h3>4. Unreadable message causes infinite hot redelivery loop <span class="sev critical">· Critical</span> <span class="badge fixed">FIXED</span></h3>
+<p class="loc">BatchReceiver.handleDelivery() · AbstractBatchService.getReader()</p>
+<p>
+<code>getReader()</code> catches deserialization failures and returns <code>null</code>;
+<code>handleDelivery()</code> then invoked <code>processor.process(null)</code>, which threw a
+<code>NullPointerException</code>, which was caught and answered with
+<code>basicNack(requeue=true)</code>. With <code>basicQos(1)</code> the same broken message is redelivered
+immediately and exclusively: an infinite tight loop that blocks the entire queue, burns a CPU core and floods
+the logs — triggered by a single malformed JSON payload sent to the queue.
+</p>
+<p><strong>Fix:</strong> a <code>null</code> message (unreadable — it can never succeed on redelivery) is now
+rejected with <code>basicNack(requeue=false)</code> and logged at error level. Note this <em>drops</em> the
+message unless a dead-letter exchange is configured — see finding 9, which is the proper home for such
+messages.</p>
+</div>
+
+<div class="finding">
+<h3>5. Emitter: new connection per message, no publisher confirms <span class="sev high">· High</span> <span class="badge fixed">FIXED</span></h3>
+<p class="loc">BatchEmitter.ServiceEmitter.emit()</p>
+<p>
+Every <code>emit(...)</code> executed <code>rabbitMQClient.connect()</code> — a full TCP + AMQP handshake —
+published one message and tore the connection down. Under load this is a connection churn storm (broker
+connection-rate limits, file-descriptor pressure, latency). Worse for reliability: messages were published
+with <code>deliveryMode=2</code> (persistent) but <em>without publisher confirms</em>, so a broker failure at
+the wrong moment loses the message with no error reported to the caller — the durable delivery mode alone
+does not guarantee the broker ever received it.
+</p>
+<p><strong>Fix:</strong> <code>ServiceEmitter</code> now caches one connection + channel, lazily (re)created
+and health-checked per publish. The channel is put in confirm mode (<code>confirmSelect()</code>) and each
+publish waits for the broker's confirm (<code>waitForConfirmsOrDie</code>, 30&nbsp;s timeout). On any publish
+failure the emitter closes the stale resources, reconnects and retries <em>once</em>; a second failure
+propagates to the caller (the REST endpoint returns an error — the caller must know the message was not
+accepted). The emitter is closed on application shutdown via the service's <code>ShutdownEvent</code> observer.
+</p>
+</div>
+
+<div class="finding">
+<h3>6. <code>stop()</code>/shutdown aborts mid-way on a broken channel <span class="sev high">· High</span> <span class="badge fixed">FIXED</span></h3>
+<p class="loc">BatchReceiver.cancel() · AbstractBatchService.stop() / onApplicationShutdown()</p>
+<p>
+<code>cancel()</code> wrapped <code>basicCancel</code> failures in <code>UncheckedIOException</code>. A broken
+channel during <code>stop()</code> therefore aborted the method after the state was set to
+<code>stopping</code> — <code>receiver.close()</code> never ran, the state never reached <code>stopped</code>,
+and in the shutdown observer <code>shutdownRetrier()</code> was skipped, leaking the retry executor thread.
+</p>
+<p><strong>Fix:</strong> <code>cancel()</code> is now best-effort (log + continue) — it is only used on the
+stop/shutdown path, which must always reach <code>close()</code>. The shutdown observer wraps
+<code>stop()</code> in <code>try/finally</code> so the retrier and the emitter are always closed.</p>
+</div>
+
+<div class="finding">
+<h3>7. ack/nack failure escapes the delivery callback <span class="sev medium">· Medium</span> <span class="badge fixed">FIXED</span></h3>
+<p class="loc">BatchReceiver.handleDelivery()</p>
+<p>
+If the channel died between receiving a delivery and acknowledging it, <code>basicAck</code>/<code>basicNack</code>
+threw <code>IOException</code> out of the consumer callback into the client library's exception handler, losing
+context. <strong>Fix:</strong> the ack/nack is wrapped and logged with queue and delivery tag; the unacked
+message is redelivered after recovery, and the shutdown listeners already drive the reconnect.
+</p>
+</div>
+
+<div class="finding">
+<h3>8. Emitted messages have no id <span class="sev medium">· Medium</span> <span class="badge fixed">FIXED</span></h3>
+<p class="loc">BatchEmitter.ServiceEmitter.emit(Message, Serializer)</p>
+<p>
+<code>Message.id</code> was never populated on emit, so the consumer-side <code>BatchContext.traceId</code>
+(and the <code>traceId</code> MDC entry used in every log line of step execution) was <code>null</code> for all
+async messages — exactly the messages that are hardest to trace. <strong>Fix:</strong> the emitter assigns a
+random UUID when the id is absent, preserving any caller-provided id.
+</p>
+</div>
+
+<h2>Recommendations (not implemented)</h2>
+
+<div class="finding">
+<h3>9. Dead-letter strategy <span class="sev high">· High</span> <span class="badge open">RECOMMENDATION</span></h3>
+<p>
+A message that deserializes fine but whose processing always fails is still nack-requeued immediately and
+forever — the same hot loop as finding 4, just for logic errors instead of parse errors. And with finding 4's
+fix, unreadable messages are dropped outright. Both belong in a dead-letter queue. Suggested follow-up:
+declare the work queues with a <code>x-dead-letter-exchange</code> argument and route rejected messages to a
+<code>queue.&lt;Service&gt;.dlq</code>; bound the requeue count by inspecting the <code>x-death</code> header and
+rejecting with <code>requeue=false</code> past a threshold. <strong>Caution:</strong> adding queue arguments to
+an <em>existing</em> queue makes <code>queueDeclare</code> fail (406 precondition); existing queues must be
+migrated or a policy-based DLX used instead (broker-side policy avoids the redeclare problem entirely and is
+the recommended route).
+</p>
+</div>
+
+<div class="finding">
+<h3>10. Fixed 5-second retry delay <span class="sev low">· Low</span> <span class="badge open">RECOMMENDATION</span></h3>
+<p>
+The start-retry loop now runs indefinitely at a fixed 5&nbsp;s interval. That is acceptable (one lightweight
+connect attempt per 5&nbsp;s), but exponential backoff with a cap (e.g. 5&nbsp;s → 60&nbsp;s) would reduce log
+noise and broker pressure during long outages.
+</p>
+</div>
+
+<div class="finding">
+<h3>11. Implicit RabbitMQ client configuration <span class="sev low">· Low</span> <span class="badge open">RECOMMENDATION</span></h3>
+<p>
+<code>application.yaml</code> configures only host/port/credentials; heartbeat, connection timeout and the
+network recovery interval all ride on defaults. For a long-running service these values are load-bearing —
+pin them explicitly in configuration (see the <code>quarkus.rabbitmqclient.*</code> properties of the
+Quarkiverse extension) so behavior is documented and survives client-library default changes.
+</p>
+</div>
+
+<div class="finding">
+<h3>12. Recovery listeners registered twice <span class="sev low">· Low</span> <span class="badge open">RECOMMENDATION</span></h3>
+<p>
+<code>registerListeners()</code> adds the same recovery listener to both the connection and the channel, so
+<code>unavailable()</code>/<code>recovered()</code> run twice per event. The transitions are idempotent, so this
+is only duplicate log noise — registering on the connection alone would suffice.
+</p>
+</div>
+
+<h2>What was <em>not</em> broken</h2>
+<ul>
+  <li>Consumer-side at-least-once semantics are correct: manual ack after successful processing, nack-requeue on failure, <code>basicQos(1)</code> to bound in-flight work.</li>
+  <li>Queues are declared durable and messages published persistent (<code>deliveryMode=2</code>).</li>
+  <li>Application-initiated shutdowns are correctly filtered out of the failure listeners (<code>isInitiatedByApplication</code>).</li>
+  <li>Lock ordering between the service and receiver monitors is consistent (service → receiver); the callback paths take only the receiver lock and touch the service through lock-free state, so no deadlock.</li>
+  <li>The state machine (<code>BatchServiceState</code>) and its REST exposure (<code>/status</code>, <code>/healtz</code>, <code>/readyz</code> with 503 until <code>started</code>) give operators a truthful health signal — <em>after</em> these fixes, since previously the service could report <code>starting</code> forever while doing nothing.</li>
+</ul>
+
+<h2>Verification</h2>
+<p>
+All changes compile and the full reactor builds: <code>mvn clean install -Dmaven.test.skip=true</code> —
+<strong>BUILD SUCCESS</strong>. The repository has no test suite, so the failure scenarios above were verified
+by code-path analysis only. Recommended manual verification with a local broker:
+</p>
+<ol>
+  <li>Start the service with RabbitMQ <em>down</em> → <code>/readyz</code> returns 503; start the broker after a few minutes → service transitions to <code>started</code> and consumes (finding 1).</li>
+  <li>With the service running, delete <code>queue.BatchAService</code> in the management UI → consumer is cancelled, queue is redeclared and consumption resumes within ~5&nbsp;s (findings 2/3).</li>
+  <li>Publish a garbage (non-JSON) body to the queue → message is rejected once, not redelivered in a loop (finding 4).</li>
+  <li>Restart the broker while POSTing to <code>/batch-a/messages</code> → in-flight emit either succeeds after one reconnect retry or returns an error; no message is silently lost (finding 5).</li>
+</ol>
+
+</body>
+</html>
