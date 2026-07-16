@@ -1,13 +1,15 @@
 package com.example.batch.common;
 
+import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 import org.slf4j.event.Level;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * @author Nikola Ivačič <nikola.ivacic@dropchop.com> on 16. 07. 2026.
+ * @author Kristijan Sečan <kristijan.secan@dropchop.com> on 16. 07. 2026.
  */
+@QuarkusTest
 class BatchStepResultTest {
 
   @Test

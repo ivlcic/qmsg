@@ -1,5 +1,6 @@
 package com.example.batch.common;
 
+import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -8,8 +9,9 @@ import static com.example.batch.common.BatchService.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * @author Nikola Ivačič <nikola.ivacic@dropchop.com> on 16. 07. 2026.
+ * @author Kristijan Sečan <kristijan.secan@dropchop.com> on 16. 07. 2026.
  */
+@QuarkusTest
 class ActionsTest {
 
   static class PayloadA {}

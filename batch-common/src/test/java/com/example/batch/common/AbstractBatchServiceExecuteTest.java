@@ -1,9 +1,10 @@
 package com.example.batch.common;
 
-import com.rabbitmq.client.Connection;
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
-import io.quarkiverse.rabbitmqclient.RabbitMQClient;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.quarkus.test.junit.QuarkusTest;
 import jakarta.enterprise.context.control.RequestContextController;
+import jakarta.enterprise.inject.Vetoed;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -15,10 +16,11 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Exercises the action routing and step chain execution of {@link AbstractBatchService}
- * with hand-wired collaborators (no CDI container, no RabbitMQ broker).
+ * with Quarkus-provided framework collaborators and no RabbitMQ broker.
  *
- * @author Nikola Ivačič <nikola.ivacic@dropchop.com> on 16. 07. 2026.
+ * @author Kristijan Sečan <kristijan.secan@dropchop.com> on 16. 07. 2026.
  */
+@QuarkusTest
 class AbstractBatchServiceExecuteTest {
 
   static class TestPayload {
@@ -64,6 +66,7 @@ class AbstractBatchServiceExecuteTest {
 
   static class ArchiveStep extends RecordingStep {}
 
+  @Vetoed
   static class TestService extends AbstractBatchService {
     TestService(Actions actions) {
       super(actions);
@@ -86,40 +89,23 @@ class AbstractBatchServiceExecuteTest {
     }
   }
 
-  static class StubRabbitMQClient implements RabbitMQClient {
-    @Override
-    public Connection connect() {
-      throw new UnsupportedOperationException("no broker in unit tests");
-    }
-
-    @Override
-    public Connection connect(String name) {
-      return connect();
-    }
-
-    @Override
-    public String getId() {
-      return "stub";
-    }
-
-    @Override
-    public void close() {
-    }
-  }
-
   private StepOne stepOne;
   private StepTwo stepTwo;
   private ArchiveStep archiveStep;
-  private SimpleMeterRegistry registry;
   private CountingRequestContextController contextController;
+
+  @Inject
+  BatchMetrics batchMetrics;
+
+  @Inject
+  BatchEmitter batchEmitter;
+
+  @Inject
+  MeterRegistry registry;
 
   private TestService newService(Actions actions) {
     TestService service = new TestService(actions);
-    BatchMetrics batchMetrics = new BatchMetrics();
-    batchMetrics.registry = registry;
     service.batchMetrics = batchMetrics;
-    BatchEmitter batchEmitter = new BatchEmitter();
-    batchEmitter.rabbitMQClient = new StubRabbitMQClient();
     service.batchEmitter = batchEmitter;
     service.requestContextController = contextController;
     service.availableSteps = List.of(stepOne, stepTwo, archiveStep);
@@ -148,7 +134,7 @@ class AbstractBatchServiceExecuteTest {
     stepOne = new StepOne();
     stepTwo = new StepTwo();
     archiveStep = new ArchiveStep();
-    registry = new SimpleMeterRegistry();
+    registry.clear();
     contextController = new CountingRequestContextController();
   }
 
@@ -164,11 +150,7 @@ class AbstractBatchServiceExecuteTest {
     TestService service = new TestService(
         byDefault(with(TestPayload.class).execute(StepOne.class))
     );
-    BatchMetrics batchMetrics = new BatchMetrics();
-    batchMetrics.registry = registry;
     service.batchMetrics = batchMetrics;
-    BatchEmitter batchEmitter = new BatchEmitter();
-    batchEmitter.rabbitMQClient = new StubRabbitMQClient();
     service.batchEmitter = batchEmitter;
     service.availableSteps = List.of(stepTwo);
     assertThrows(BatchServiceException.class, service::initializeSteps);
