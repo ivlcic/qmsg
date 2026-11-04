@@ -133,7 +133,7 @@ Responsibilities:
 - tracks lifecycle with `BatchServiceState`
 - creates the RabbitMQ receiver and emitter wiring
 - executes the registered step chain for the resolved action
-- returns `ack` on successful processing and `nack` with requeue on failure
+- acknowledges successful processing, requests redelivery only for explicit retries, and sends permanent failures to the final DLQ
 
 Important implementation details:
 
@@ -155,16 +155,30 @@ import com.example.batch.a.BatchAData;
 import com.example.batch.common.BatchContext;
 import com.example.batch.common.BatchStep;
 
+import static com.example.batch.common.BatchStep.proceed;
+
 public class ExampleStep implements BatchStep<BatchAData> {
   @Override
-  public void execute(BatchContext<BatchAData> context) throws Exception {
-    BatchAData payload = context.payload();
+  public Result execute(BatchContext<BatchAData> context) throws Exception {
+    BatchAData payload = context.getPayload();
     context.put("payloadId", payload.id());
+    return proceed();
   }
 }
 ```
 
 Routing and ordering are intentionally external to step implementations. A step only operates on its typed `BatchContext`.
+
+Each step returns a Lombok-built `BatchStep.Result` with an explicit `Process`:
+
+- `CONTINUE`: run the next step; helpers `proceed(...)` and `proceeder(...)`
+- `STOP`: stop successfully and acknowledge; helpers `stop(...)` and `stopper(...)`
+- `RETRY`: stop and request redelivery; helpers `retry(...)` and `retryer(...)`
+- `FAIL`: stop permanently and send the message to the final DLQ; helpers `fail(...)` and `failer(...)`
+
+The noun-form helpers return a builder for customization before `.build()`. Logging helpers accept varargs and move a trailing `Throwable` into `cause`, removing it from `logArgs`. The cause is diagnostic only; it does not change the outcome. Failure logging defaults to `ERROR`.
+
+Unexpected step exceptions become `fail(...)` results and follow the same logging, error-metrics, and DLQ flow as explicit failures. Null or invalid step results and unknown actions also fail permanently. Synchronous `service.execute(...)` returns `true` for successful completion or `STOP`, and `false` for `FAIL` or `RETRY`.
 
 ### Batch Context
 
@@ -189,7 +203,13 @@ Responsibilities:
 - manages consumer registration and cancellation
 - reads raw deliveries through `Message.Reader`
 - processes messages through `Message.Processor`
-- performs `basicAck` or `basicNack(..., requeue=true)` based on processor result
+- handles `Message.Result` dispositions `ACK`, `RETRY`, and `REJECT`
+- performs `basicAck` on success and `basicNack(..., requeue=true)` only for explicit retries
+- forwards unreadable messages, unexpected processing exceptions, and rejected results through `BatchDeadLetterPublisher` to `queue.<Service>.dlq`
+- preserves original message bytes and metadata, waits for a mandatory publish and publisher confirmation, and then acknowledges the original delivery
+- leaves the original unsettled and schedules recovery if DLQ forwarding fails
+
+Existing work-queue declaration arguments are unchanged. Final DLQs are declared separately, avoiding an incompatible redeclaration of existing work queues.
 
 ### RabbitMQ Emitter
 
@@ -240,7 +260,7 @@ Rollups:
 - by action over all steps: `action="<action>"`, `step="_all"`
 - by action and step: `action="<action>"`, `step="<StepClass>"`
 
-Throughput counters are incremented on successful action or step execution. Error counters are incremented when action resolution fails or a step throws.
+Throughput counters are incremented on successful action or step execution. Error counters are incremented when action resolution fails or a step returns `FAIL` or `RETRY`, including exceptions converted into failed results. Failed steps do not increment throughput counters.
 
 ### REST Helpers
 
@@ -509,14 +529,15 @@ Prerequisites:
 
 - `BatchStatusResource` exposes status, healtz, and readyz only; concrete start/stop HTTP resources must extend or implement the control behavior explicitly.
 - The default async reader path depends on the current `DefaultDeserializer` implementation, so typed payload deserialization should be checked carefully when adding actions with different payload types.
-- On processing failure the message is requeued, so poison messages can loop indefinitely without a dead-letter strategy.
+- Explicit `RETRY` outcomes still requeue immediately without an attempt limit. Delayed, bounded retry delivery is pending selection of the retry transport strategy; `messageDeferMs` is carried in the processor result but is not yet applied by the receiver.
 
 ## Verification State
 
-This file reflects the current source layout and API shape after the framework refactor. The repository was compiled successfully with:
+Verification commands using the default local Maven cache:
 
 ```bash
-mvn -q -Dmaven.repo.local=.m2/repository -DskipTests compile
+mvn -q -ntp -o -DskipTests compile
+mvn -q -ntp -o -Dquarkus.rabbitmqclient.devservices.enabled=false -Dmaven.test.redirectTestOutputToFile=true test
 ```
 
-Tests were not run.
+Framework tests run with RabbitMQ Dev Services disabled. Delivery and publisher-confirm behavior is exercised with test doubles; a live-broker integration test has not been run. Omit `-o` when dependencies need downloading, and set `-Dmaven.repo.local=.m2/repository` when the home cache is not writable.

@@ -19,8 +19,10 @@ public interface BatchStep<P> {
   @AllArgsConstructor(access = AccessLevel.PRIVATE)
   class Result {
     public enum Process {
+      CONTINUE,
       STOP,
-      CONTINUE
+      RETRY,
+      FAIL
     }
 
     @Builder.Default
@@ -30,158 +32,118 @@ public interface BatchStep<P> {
     private final Object[] logArgs;
     private final Throwable cause;
     @Builder.Default
-    private final boolean messageRetry = false;
-    @Builder.Default
     private final long messageDeferMs = 0L;
   }
 
-  private static Result.ResultBuilder resultBuilder(Result.Process process, boolean messageRetry) {
+  private static Result.ResultBuilder resultBuilder(
+      Result.Process process, Level logLevel, String logMessage, Object... logArgs) {
+    Throwable cause = null;
+    if (logArgs != null && logArgs.length > 0 && logArgs[logArgs.length - 1] instanceof Throwable throwable) {
+      cause = throwable;
+      logArgs = Arrays.copyOf(logArgs, logArgs.length - 1);
+    }
     return Result.builder()
         .process(process)
-        .messageRetry(messageRetry);
-  }
-
-  private static Throwable trailingCause(Object[] logArgs) {
-    if (logArgs == null || logArgs.length == 0) {
-      return null;
-    }
-    Object last = logArgs[logArgs.length - 1];
-    if (last instanceof Throwable throwable) {
-      return throwable;
-    }
-    return null;
-  }
-
-  private static Object[] sanitizeLogArgs(Object[] logArgs) {
-    if (logArgs == null || logArgs.length == 0) {
-      return logArgs;
-    }
-    if (trailingCause(logArgs) == null) {
-      return logArgs;
-    }
-    return Arrays.copyOf(logArgs, logArgs.length - 1);
-  }
-
-  private static Result.ResultBuilder resultBuilder(
-      Result.Process process, boolean messageRetry, Level logLevel, String logMessage, Object... logArgs) {
-    Throwable cause = trailingCause(logArgs);
-    return resultBuilder(process, messageRetry)
         .logLevel(logLevel)
         .logMessage(logMessage)
-        .logArgs(sanitizeLogArgs(logArgs))
+        .logArgs(logArgs)
         .cause(cause);
   }
 
-  static Result.ResultBuilder proceeder() {
-    return resultBuilder(Result.Process.CONTINUE, false);
-  }
-
-  static Result.ResultBuilder proceeder(String logMessage) {
-    return proceeder(Level.INFO, logMessage);
+  static Result.ResultBuilder proceeder(Level logLevel, String logMessage, Object... logArgs) {
+    return resultBuilder(Result.Process.CONTINUE, logLevel, logMessage, logArgs);
   }
 
   static Result.ResultBuilder proceeder(String logMessage, Object... logArgs) {
     return proceeder(Level.INFO, logMessage, logArgs);
   }
 
-  static Result.ResultBuilder proceeder(Level logLevel, String logMessage) {
-    return proceeder(logLevel, logMessage, new Object[0]);
-  }
-
-  static Result.ResultBuilder proceeder(Level logLevel, String logMessage, Object... logArgs) {
-    return resultBuilder(Result.Process.CONTINUE, false, logLevel, logMessage, logArgs);
-  }
-
-  static Result proceed() {
-    return proceeder().build();
-  }
-
-  static Result proceed(String logMessage) {
-    return proceeder(logMessage).build();
-  }
-
-  static Result proceed(String logMessage, Object... logArgs) {
-    return proceeder(logMessage, logArgs).build();
-  }
-
-  static Result proceed(Level logLevel, String logMessage) {
-    return proceeder(logLevel, logMessage).build();
+  static Result.ResultBuilder proceeder() {
+    return proceeder(Level.INFO, null);
   }
 
   static Result proceed(Level logLevel, String logMessage, Object... logArgs) {
     return proceeder(logLevel, logMessage, logArgs).build();
   }
 
-  static Result.ResultBuilder stopper() {
-    return resultBuilder(Result.Process.STOP, false);
+  static Result proceed(String logMessage, Object... logArgs) {
+    return proceeder(logMessage, logArgs).build();
+  }
+
+  static Result proceed() {
+    return proceeder().build();
+  }
+
+  static Result.ResultBuilder stopper(Level logLevel, String logMessage, Object... logArgs) {
+    return resultBuilder(Result.Process.STOP, logLevel, logMessage, logArgs);
   }
 
   static Result.ResultBuilder stopper(String logMessage, Object... logArgs) {
     return stopper(Level.WARN, logMessage, logArgs);
   }
 
-  static Result.ResultBuilder stopper(Level logLevel, String logMessage, Object... logArgs) {
-    return resultBuilder(Result.Process.STOP, false, logLevel, logMessage, logArgs);
-  }
-
-  static Result stop() {
-    return stopper().build();
-  }
-
-  static Result stop(String logMessage) {
-    return stopper(logMessage).build();
-  }
-
-  static Result stop(String logMessage, Object... logArgs) {
-    return stopper(logMessage, logArgs).build();
-  }
-
-  static Result stop(Level logLevel, String logMessage) {
-    return stopper(logLevel, logMessage).build();
+  static Result.ResultBuilder stopper() {
+    return stopper(Level.WARN, null);
   }
 
   static Result stop(Level logLevel, String logMessage, Object... logArgs) {
     return stopper(logLevel, logMessage, logArgs).build();
   }
 
-  static Result.ResultBuilder retryer() {
-    return resultBuilder(Result.Process.STOP, true);
+  static Result stop(String logMessage, Object... logArgs) {
+    return stopper(logMessage, logArgs).build();
   }
 
-  static Result.ResultBuilder retryer(String logMessage) {
-    return retryer(Level.WARN, logMessage);
+  static Result stop() {
+    return stopper().build();
+  }
+
+  static Result.ResultBuilder retryer(Level logLevel, String logMessage, Object... logArgs) {
+    return resultBuilder(Result.Process.RETRY, logLevel, logMessage, logArgs);
   }
 
   static Result.ResultBuilder retryer(String logMessage, Object... logArgs) {
     return retryer(Level.WARN, logMessage, logArgs);
   }
 
-  static Result.ResultBuilder retryer(Level logLevel, String logMessage) {
-    return retryer(logLevel, logMessage, new Object[0]);
+  static Result.ResultBuilder retryer() {
+    return retryer(Level.WARN, null);
   }
 
-  static Result.ResultBuilder retryer(Level logLevel, String logMessage, Object... logArgs) {
-    return resultBuilder(Result.Process.STOP, true, logLevel, logMessage, logArgs);
-  }
-
-  static Result retry() {
-    return retryer().build();
-  }
-
-  static Result retry(String logMessage) {
-    return retryer(logMessage).build();
+  static Result retry(Level logLevel, String logMessage, Object... logArgs) {
+    return retryer(logLevel, logMessage, logArgs).build();
   }
 
   static Result retry(String logMessage, Object... logArgs) {
     return retryer(logMessage, logArgs).build();
   }
 
-  static Result retry(Level logLevel, String logMessage) {
-    return retryer(logLevel, logMessage).build();
+  static Result retry() {
+    return retryer().build();
   }
 
-  static Result retry(Level logLevel, String logMessage, Object... logArgs) {
-    return retryer(logLevel, logMessage, logArgs).build();
+  static Result.ResultBuilder failer(Level logLevel, String logMessage, Object... logArgs) {
+    return resultBuilder(Result.Process.FAIL, logLevel, logMessage, logArgs);
+  }
+
+  static Result.ResultBuilder failer(String logMessage, Object... logArgs) {
+    return failer(Level.ERROR, logMessage, logArgs);
+  }
+
+  static Result.ResultBuilder failer() {
+    return failer(Level.ERROR, null);
+  }
+
+  static Result fail(Level logLevel, String logMessage, Object... logArgs) {
+    return failer(logLevel, logMessage, logArgs).build();
+  }
+
+  static Result fail(String logMessage, Object... logArgs) {
+    return failer(logMessage, logArgs).build();
+  }
+
+  static Result fail() {
+    return failer().build();
   }
 
   Result execute(BatchContext<P> context) throws Exception;

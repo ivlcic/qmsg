@@ -13,10 +13,9 @@ import static org.junit.jupiter.api.Assertions.*;
 class BatchStepResultTest {
 
   @Test
-  void proceedHasContinueSemanticsAndNoRetry() {
+  void proceedHasContinueSemantics() {
     BatchStep.Result result = BatchStep.proceed();
     assertEquals(BatchStep.Result.Process.CONTINUE, result.getProcess());
-    assertFalse(result.isMessageRetry());
     assertEquals(0L, result.getMessageDeferMs());
     assertNull(result.getLogMessage());
     assertNull(result.getCause());
@@ -35,7 +34,6 @@ class BatchStepResultTest {
   void stopHasStopSemanticsWithoutRetry() {
     BatchStep.Result result = BatchStep.stop();
     assertEquals(BatchStep.Result.Process.STOP, result.getProcess());
-    assertFalse(result.isMessageRetry());
   }
 
   @Test
@@ -46,17 +44,16 @@ class BatchStepResultTest {
   }
 
   @Test
-  void retryHasStopSemanticsWithRetry() {
+  void retryHasExplicitRetrySemantics() {
     BatchStep.Result result = BatchStep.retry();
-    assertEquals(BatchStep.Result.Process.STOP, result.getProcess());
-    assertTrue(result.isMessageRetry());
+    assertEquals(BatchStep.Result.Process.RETRY, result.getProcess());
   }
 
   @Test
   void retryWithMessageDefaultsToWarnLevel() {
     BatchStep.Result result = BatchStep.retry("try again [{}]", "later");
     assertEquals(Level.WARN, result.getLogLevel());
-    assertTrue(result.isMessageRetry());
+    assertEquals(BatchStep.Result.Process.RETRY, result.getProcess());
   }
 
   @Test
@@ -81,6 +78,43 @@ class BatchStepResultTest {
         .build();
     assertEquals(Level.ERROR, result.getLogLevel());
     assertEquals(5000L, result.getMessageDeferMs());
-    assertTrue(result.isMessageRetry());
+    assertEquals(BatchStep.Result.Process.RETRY, result.getProcess());
+  }
+
+  @Test
+  void failWithoutCauseHasExplicitFailSemantics() {
+    BatchStep.Result result = BatchStep.fail();
+    assertEquals(BatchStep.Result.Process.FAIL, result.getProcess());
+    assertEquals(Level.ERROR, result.getLogLevel());
+    assertNull(result.getCause());
+  }
+
+  @Test
+  void failExtractsTrailingCauseAndPreservesFormattingArguments() {
+    IllegalArgumentException failure = new IllegalArgumentException("invalid payload");
+    BatchStep.Result result = BatchStep.fail("Invalid payload [{}]", "item-1", failure);
+    assertEquals(BatchStep.Result.Process.FAIL, result.getProcess());
+    assertEquals(Level.ERROR, result.getLogLevel());
+    assertSame(failure, result.getCause());
+    assertArrayEquals(new Object[]{"item-1"}, result.getLogArgs());
+  }
+
+  @Test
+  void failerAllowsCustomizationBeforeBuilding() {
+    IllegalArgumentException failure = new IllegalArgumentException("invalid payload");
+    BatchStep.Result result = BatchStep.failer("Invalid payload [{}]", "item-1", failure)
+        .logLevel(Level.WARN)
+        .build();
+    assertEquals(BatchStep.Result.Process.FAIL, result.getProcess());
+    assertEquals(Level.WARN, result.getLogLevel());
+    assertSame(failure, result.getCause());
+    assertArrayEquals(new Object[]{"item-1"}, result.getLogArgs());
+  }
+
+  @Test
+  void stopCauseDoesNotChangeItsOutcome() {
+    BatchStep.Result result = BatchStep.stop("Stopping", new IllegalStateException("diagnostic"));
+    assertEquals(BatchStep.Result.Process.STOP, result.getProcess());
+    assertNotNull(result.getCause());
   }
 }

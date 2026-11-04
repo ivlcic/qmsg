@@ -39,6 +39,9 @@ public class BatchReceiver implements AutoCloseable {
   @SuppressWarnings("CdiInjectionPointsInspection")
   RabbitMQClient rabbitMQClient;
 
+  @Inject
+  BatchDeadLetterPublisher deadLetters;
+
   private Connection connection;
   private Channel channel;
   private Controller controller;
@@ -127,39 +130,43 @@ public class BatchReceiver implements AutoCloseable {
   }
 
   private <M extends Message<P>, P> void handleDelivery(
-      Delivery delivery, Message.Reader<M, P> reader, Message.Processor<M, P> processor) {
+      Channel deliveryChannel, Delivery delivery, Message.Reader<M, P> reader, Message.Processor<M, P> processor) {
     long deliveryTag = delivery.getEnvelope().getDeliveryTag();
-    boolean ack = false;
-    boolean requeue = true;
-    M msg = null;
+    Message.Result result;
     try {
-      msg = reader.read(delivery.getBody());
-    } catch (Exception e) {
-      log.error("Message reader failed for queue [{}]", controller.queueName(), e);
-    }
-    if (msg == null) {
-      // An unreadable message can never succeed; requeueing it would redeliver it immediately
-      // (basicQos(1)) and spin the consumer forever while blocking the rest of the queue.
-      log.error("Discarding unreadable message from queue [{}]", controller.queueName());
-      requeue = false;
-    } else {
-      try {
-        ack = processor.process(msg);
-      } catch (Exception e) {
-        log.error("Message processor failed for queue [{}]", controller.queueName(), e);
+      M msg = reader.read(delivery.getBody());
+      if (msg == null) {
+        result = Message.Result.rejected(new BatchServiceException("Message reader returned no message"));
+      } else {
+        result = processor.process(msg);
+        if (result == null) {
+          result = Message.Result.rejected(new BatchServiceException("Message processor returned no result"));
+        }
       }
+    } catch (Exception e) {
+      log.error("Message delivery failed for queue [{}]", controller.queueName(), e);
+      result = Message.Result.rejected(e);
     }
 
     try {
-      if (ack) {
-        channel.basicAck(deliveryTag, false);
-      } else {
-        channel.basicNack(deliveryTag, false, requeue);
+      switch (result.disposition()) {
+        case ACK -> deliveryChannel.basicAck(deliveryTag, false);
+        case RETRY -> deliveryChannel.basicNack(deliveryTag, false, true);
+        case REJECT -> {
+          log.warn("Dead-lettering delivery [{}] from queue [{}]", deliveryTag, controller.queueName());
+          deadLetters.publish(controller.queueName(), delivery, result.cause());
+          deliveryChannel.basicAck(deliveryTag, false);
+        }
       }
     } catch (Exception e) {
-      // The channel died between delivery and (n)ack; the unacked message will be redelivered
-      // after recovery, and the shutdown listeners drive the reconnect.
-      log.warn("Failed to ack/nack delivery [{}] for queue [{}]", deliveryTag, controller.queueName(), e);
+      log.warn("Failed to settle delivery [{}] for queue [{}]; retaining it for recovery",
+          deliveryTag, controller.queueName(), e);
+      if (channel == deliveryChannel && !controller.isRetryForbidden()) {
+        controller.clearConsumerTag();
+        controller.retryPending();
+        close();
+        scheduleStartRetry();
+      }
     }
   }
 
@@ -205,6 +212,7 @@ public class BatchReceiver implements AutoCloseable {
 
   @Override
   public synchronized void close() {
+    deadLetters.close();
     try {
       if (channel != null && channel.isOpen()) {
         channel.close();
@@ -255,11 +263,12 @@ public class BatchReceiver implements AutoCloseable {
         unavailable(cause == null ? "consumer shutdown" : cause.getMessage());
       };
       String queueName = controller.queueName();
-      return channel.basicConsume(
+      Channel deliveryChannel = channel;
+      return deliveryChannel.basicConsume(
           queueName,
           false,
           queueName + ".consumer",
-          (consumerTag, delivery) -> handleDelivery(delivery, reader, processor),
+          (consumerTag, delivery) -> handleDelivery(deliveryChannel, delivery, reader, processor),
           this::consumerCancelled,
           shutdownCallback
       );

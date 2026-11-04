@@ -181,10 +181,10 @@ class AbstractBatchServiceExecuteTest {
   }
 
   @Test
-  void unknownActionThrowsAndRecordsExecutionError() {
+  void unknownActionFailsAndRecordsExecutionError() throws Exception {
     TestService service = newService();
     BatchContext<TestPayload> context = new BatchContext<>("nope", "t-1", new TestPayload("p"));
-    assertThrows(BatchServiceException.class, () -> service.execute(context));
+    assertFalse(service.execute(context));
     assertEquals(1.0, counter("batch.execution.errors", "nope", "_all"));
     assertEquals(1.0, counter("batch.execution.errors", "_all", "_all"));
   }
@@ -208,32 +208,30 @@ class AbstractBatchServiceExecuteTest {
   }
 
   @Test
-  void stopWithCauseRecordsExecutionAndStepErrors() throws Exception {
+  void stopWithDiagnosticCauseRecordsSuccess() throws Exception {
     stepTwo.result = BatchStep.stop("failed [{}]", "x", new IllegalStateException("boom"));
     TestService service = newService();
     assertTrue(service.execute(new BatchContext<>(null, "t-1", new TestPayload("p"))));
-    assertEquals(1.0, counter("batch.execution.errors", "<<default>>", "_all"));
-    assertEquals(1.0, counter("batch.execution.errors", "<<default>>", "StepTwo"));
+    assertEquals(0.0, counter("batch.execution.errors", "<<default>>", "_all"));
+    assertEquals(0.0, counter("batch.execution.errors", "<<default>>", "StepTwo"));
+    assertEquals(1.0, counter("batch.execution.throughput", "<<default>>", "_all"));
   }
 
   @Test
-  void nullStepResultThrowsAndRecordsErrors() {
+  void nullStepResultFailsAndRecordsErrors() throws Exception {
     stepOne.result = null;
     TestService service = newService();
     BatchContext<TestPayload> context = new BatchContext<>(null, "t-1", new TestPayload("p"));
-    assertThrows(BatchServiceException.class, () -> service.execute(context));
+    assertFalse(service.execute(context));
     assertEquals(1.0, counter("batch.execution.errors", "<<default>>", "StepOne"));
   }
 
   @Test
-  void stepExceptionPropagatesAndRecordsErrors() {
+  void stepExceptionBecomesFailureAndRecordsErrors() throws Exception {
     stepTwo.failure = new IllegalStateException("boom");
     TestService service = newService();
     BatchContext<TestPayload> context = new BatchContext<>(null, "t-1", new TestPayload("p"));
-    IllegalStateException thrown = assertThrows(
-        IllegalStateException.class, () -> service.execute(context)
-    );
-    assertEquals("boom", thrown.getMessage());
+    assertFalse(service.execute(context));
     assertEquals(List.of("StepOne", "StepTwo"), RecordingStep.trail(context));
     assertEquals(1.0, counter("batch.execution.errors", "<<default>>", "_all"));
     assertEquals(1.0, counter("batch.execution.errors", "<<default>>", "StepTwo"));
@@ -263,11 +261,10 @@ class AbstractBatchServiceExecuteTest {
   }
 
   @Test
-  void requestContextIsDeactivatedEvenWhenStepThrows() {
+  void requestContextIsDeactivatedEvenWhenStepThrows() throws Exception {
     stepOne.failure = new IllegalStateException("boom");
     TestService service = newService();
-    assertThrows(IllegalStateException.class,
-        () -> service.execute(new BatchContext<>(null, "t-1", new TestPayload("p"))));
+    assertFalse(service.execute(new BatchContext<>(null, "t-1", new TestPayload("p"))));
     assertEquals(1, contextController.activations);
     assertEquals(1, contextController.deactivations);
   }
@@ -277,5 +274,120 @@ class AbstractBatchServiceExecuteTest {
     TestService service = newService();
     assertTrue(service.execute("archive", "req-1", new TestPayload("p")));
     assertEquals(1.0, counter("batch.execution.throughput", "archive", "_all"));
+  }
+
+  private Message.Result process(TestService service) throws Exception {
+    Message<TestPayload> message = new Message<>();
+    message.setId("t-1");
+    message.setPayload(new TestPayload("p"));
+    Message.Processor<Message<TestPayload>, TestPayload> processor = service.getProcessor();
+    return processor.process(message);
+  }
+
+  @Test
+  void asyncSuccessfulStopAcknowledges() throws Exception {
+    stepOne.result = BatchStep.stop("nothing to do");
+    assertEquals(Message.Disposition.ACK, process(newService()).disposition());
+  }
+
+  @Test
+  void asyncFailRejectsPermanently() throws Exception {
+    RuntimeException failure = new IllegalArgumentException("invalid item");
+    stepOne.result = BatchStep.fail("invalid", failure);
+    Message.Result result = process(newService());
+    assertEquals(Message.Disposition.REJECT, result.disposition());
+    assertSame(failure, result.cause());
+  }
+
+  @Test
+  void explicitFailureWithoutCauseStopsChainAndRecordsErrors() throws Exception {
+    stepOne.result = BatchStep.fail("invalid item");
+    TestService service = newService();
+    BatchContext<TestPayload> context = new BatchContext<>(null, "t-1", new TestPayload("p"));
+    assertFalse(service.execute(context));
+    assertEquals(List.of("StepOne"), RecordingStep.trail(context));
+    assertEquals(1.0, counter("batch.execution.errors", "<<default>>", "_all"));
+    assertEquals(1.0, counter("batch.execution.errors", "<<default>>", "StepOne"));
+    assertEquals(0.0, counter("batch.execution.throughput", "<<default>>", "StepOne"));
+    assertEquals(0.0, counter("batch.execution.throughput", "<<default>>", "_all"));
+  }
+
+  @Test
+  void asyncFailWithoutCauseRejectsPermanently() throws Exception {
+    stepOne.result = BatchStep.fail("invalid item");
+    Message.Result result = process(newService());
+    assertEquals(Message.Disposition.REJECT, result.disposition());
+    assertNull(result.cause());
+  }
+
+  @Test
+  void asyncStopWithDiagnosticCauseAcknowledges() throws Exception {
+    stepOne.result = BatchStep.stop("nothing to do", new IllegalStateException("diagnostic"));
+    assertEquals(Message.Disposition.ACK, process(newService()).disposition());
+  }
+
+  @Test
+  void asyncUnexpectedExceptionUsesFailureOutcomeAndPreservesCause() throws Exception {
+    RuntimeException failure = new IllegalStateException("unexpected");
+    stepOne.failure = failure;
+    Message.Result result = process(newService());
+    assertEquals(Message.Disposition.REJECT, result.disposition());
+    assertSame(failure, result.cause());
+    assertEquals(1.0, counter("batch.execution.errors", "<<default>>", "_all"));
+    assertEquals(1.0, counter("batch.execution.errors", "<<default>>", "StepOne"));
+    assertEquals(0.0, counter("batch.execution.throughput", "<<default>>", "StepOne"));
+    assertEquals(0.0, counter("batch.execution.throughput", "<<default>>", "StepTwo"));
+    assertEquals(1, contextController.deactivations);
+  }
+
+  @Test
+  void asyncUnknownActionIsRejected() throws Exception {
+    Message<TestPayload> message = new Message<>();
+    message.setId("t-1");
+    message.setAction("nope");
+    message.setPayload(new TestPayload("p"));
+    Message.Processor<Message<TestPayload>, TestPayload> processor = newService().getProcessor();
+    assertEquals(Message.Disposition.REJECT, processor.process(message).disposition());
+    assertEquals(1.0, counter("batch.execution.errors", "nope", "_all"));
+  }
+
+  @Test
+  void invalidStepOutcomeFailsAndStopsChain() throws Exception {
+    stepOne.result = BatchStep.Result.builder().process(null).build();
+    TestService service = newService();
+    BatchContext<TestPayload> context = new BatchContext<>(null, "t-1", new TestPayload("p"));
+    assertFalse(service.execute(context));
+    assertEquals(List.of("StepOne"), RecordingStep.trail(context));
+    assertEquals(1.0, counter("batch.execution.errors", "<<default>>", "StepOne"));
+  }
+
+  @Test
+  void nullContextReturnsFailure() throws Exception {
+    assertFalse(newService().execute((BatchContext<TestPayload>) null));
+    assertEquals(1.0, counter("batch.execution.errors", "<<default>>", "_all"));
+  }
+
+  @Test
+  void requestContextActivationExceptionBecomesFailure() throws Exception {
+    RuntimeException failure = new IllegalStateException("context unavailable");
+    TestService service = newService();
+    service.requestContextController = new RequestContextController() {
+      public boolean activate() { throw failure; }
+      public void deactivate() { throw new AssertionError("context was not activated"); }
+    };
+    Message.Result result = process(service);
+    assertEquals(Message.Disposition.REJECT, result.disposition());
+    assertSame(failure, result.cause());
+    assertEquals(1.0, counter("batch.execution.errors", "<<default>>", "_all"));
+  }
+
+  @Test
+  void asyncRetryPreservesRequestedDelayAndCause() throws Exception {
+    RuntimeException failure = new IllegalStateException("temporarily unavailable");
+    stepOne.result = BatchStep.retryer("try later", failure).messageDeferMs(7000).build();
+    Message.Result result = process(newService());
+    assertEquals(Message.Disposition.RETRY, result.disposition());
+    assertEquals(7000, result.deferMs());
+    assertSame(failure, result.cause());
   }
 }

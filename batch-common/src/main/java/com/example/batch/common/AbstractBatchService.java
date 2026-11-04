@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static com.dropchop.recyclone.base.api.model.utils.Logging.resetMdcValue;
 import static com.dropchop.recyclone.base.api.model.utils.Logging.resetMdcValues;
+import static com.example.batch.common.BatchStep.fail;
 import static java.util.Map.entry;
 
 /**
@@ -165,7 +166,7 @@ public abstract class AbstractBatchService implements BatchService {
     log.error(result.getLogMessage(), result.getLogArgs(), result.getCause());
   }
 
-  private <P> boolean executeSteps(Action<P> action, String actionName, BatchContext<P> context) throws Exception {
+  private <P> BatchStep.Result executeSteps(Action<P> action, String actionName, BatchContext<P> context) {
     resetMdcValues(
         entry("traceId", context.getTraceId()),
         entry("action", actionName),
@@ -177,46 +178,40 @@ public abstract class AbstractBatchService implements BatchService {
         String stepName = action.getStepTypes().get(stepIndex).getSimpleName();
         resetMdcValue("step", stepName);
         try {
-          BatchStep.Result result = step.execute(context);
-          if (result == null) {
-            throw new BatchServiceException(
-                "Batch step [" + stepName + "] returned null for action [" + actionName + "] in [" + getName() + "] service!"
-            );
+          BatchStep.Result result;
+          try {
+            result = step.execute(context);
+            if (result == null || result.getProcess() == null) {
+              result = fail("Batch step [{}] returned no valid result", stepName);
+            }
+          } catch (Exception e) {
+            result = fail("Batch step [{}] failed", stepName, e);
+          }
+          logResult(result);
+          if (result.getProcess() == BatchStep.Result.Process.FAIL ||
+              result.getProcess() == BatchStep.Result.Process.RETRY) {
+            metrics.recordExecutionError(actionName);
+            metrics.recordStepError(actionName, stepName);
+            return result;
           }
           metrics.recordStep(actionName, stepName);
-          logResult(result);
           if (result.getProcess() == BatchStep.Result.Process.STOP) {
-            if (result.getMessageDeferMs() > 0L) {
-              log.warn(
-                  "Batch step [{}] for action [{}] requested message defer [{}]ms, " +
-                      "but deferred retry is not implemented; retry will happen immediately",
-                  stepName, actionName, result.getMessageDeferMs()
-              );
-            }
-            if (result.getCause() != null) {
-              metrics.recordExecutionError(actionName);
-              metrics.recordStepError(actionName, stepName);
-            }
-            return !result.isMessageRetry();
+            metrics.recordExecution(actionName);
+            return result;
           }
-        } catch (Exception e) {
-          metrics.recordExecutionError(actionName);
-          metrics.recordStepError(actionName, stepName);
-          throw e;
         } finally {
           Logging.clearMdcValues("step");
         }
         stepIndex++;
       }
       metrics.recordExecution(actionName);
-      return true;
+      return BatchStep.proceed();
     } finally {
       Logging.clearMdcValues("service", "action", "traceId");
     }
   }
 
-  private <P> boolean executeInRequestContext(Action<P> action, String actionName, BatchContext<P> context)
-      throws Exception {
+  private <P> BatchStep.Result executeInRequestContext(Action<P> action, String actionName, BatchContext<P> context) {
     boolean activated = requestContextController.activate();
     try {
       return executeSteps(action, actionName, context);
@@ -227,18 +222,33 @@ public abstract class AbstractBatchService implements BatchService {
     }
   }
 
-  public <P> boolean execute(BatchContext<P> context) throws Exception {
-    String actionName = normalizeAction(context.getAction());
-    Action<?> targetAction = actions.get(actionName);
-    if (targetAction == null || targetAction.isEmpty()) {
-      metrics.recordExecutionError(actionName);
-      throw new BatchServiceException(
-          "No steps found for action [" + actionName + "] in [" + getName() + "] service!"
-      );
+  private <P> BatchStep.Result executeResult(BatchContext<P> context) {
+    String actionName = context == null ? DEFAULT_ACTION : normalizeAction(context.getAction());
+    BatchStep.Result result;
+    try {
+      Action<?> targetAction = actions.get(actionName);
+      if (context == null) {
+        result = fail("Batch context is required");
+      } else if (targetAction == null || targetAction.isEmpty()) {
+        result = fail("No steps found for action [{}] in service [{}]", actionName, getName());
+      } else {
+        @SuppressWarnings("unchecked")
+        Action<P> a = (Action<P>) targetAction;
+        return executeInRequestContext(a, actionName, context);
+      }
+    } catch (Exception e) {
+      result = fail("Batch execution failed for action [{}] in service [{}]", actionName, getName(), e);
     }
-    @SuppressWarnings("unchecked")
-    Action<P> a = (Action<P>) targetAction;
-    return executeInRequestContext(a, actionName, context);
+    metrics.recordExecutionError(actionName);
+    logResult(result);
+    return result;
+  }
+
+  public <P> boolean execute(BatchContext<P> context) throws Exception {
+    return switch (executeResult(context).getProcess()) {
+      case CONTINUE, STOP -> true;
+      case RETRY, FAIL -> false;
+    };
   }
 
   public <P> boolean execute(String requestedAction, String requestId, P payload) throws Exception {
@@ -247,21 +257,23 @@ public abstract class AbstractBatchService implements BatchService {
   }
 
   protected <M extends Message<P>, P> Message.Processor<M, P> getProcessor() {
-    return message -> execute(
-        new BatchContext<>(message.getAction(), message.getId(), message.getPayload(), true)
-    );
+    return message -> {
+      BatchStep.Result result = executeResult(
+          new BatchContext<>(message.getAction(), message.getId(), message.getPayload(), true)
+      );
+      return switch (result.getProcess()) {
+        case CONTINUE, STOP -> Message.Result.acknowledged();
+        case RETRY -> Message.Result.retry(result.getMessageDeferMs(), result.getCause());
+        case FAIL -> Message.Result.rejected(result.getCause());
+      };
+    };
   }
 
   protected <M extends Message<P>, P> Message.Reader<M, P> getReader() {
     return body -> {
-      try {
-        Message.Deserializer<Message<P>> nodeDeserializer = getDeserializer();
-        //noinspection unchecked
-        return (M)nodeDeserializer.deserialize(body);
-      } catch (Exception e) {
-        log.error("Failed to process message from queue for service [{}]!", getName(), e);
-        return null;
-      }
+      Message.Deserializer<P> nodeDeserializer = getDeserializer();
+      //noinspection unchecked
+      return (M) nodeDeserializer.deserialize(body);
     };
   }
 
