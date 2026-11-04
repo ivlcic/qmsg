@@ -24,9 +24,9 @@
 
     <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
     <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
-    <quarkus.platform.version>3.35.4</quarkus.platform.version>
+    <quarkus.platform.version>3.40.1.1</quarkus.platform.version>
 
-    <quarkus-rabbitmq-client.version>3.3.0</quarkus-rabbitmq-client.version>
+    <quarkus-rabbitmq-client.version>3.4.1</quarkus-rabbitmq-client.version>
     <surefire-plugin.version>3.5.3</surefire-plugin.version>
     <lombok.version>1.18.46</lombok.version>
     <recyclone.version>2.0.48-SNAPSHOT</recyclone.version>
