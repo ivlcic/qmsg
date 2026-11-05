@@ -40,7 +40,7 @@ public class BatchReceiver implements AutoCloseable {
   RabbitMQClient rabbitMQClient;
 
   @Inject
-  BatchDeadLetterPublisher deadLetters;
+  BatchDeliveryPublisher deliveryPublisher;
 
   private Connection connection;
   private Channel channel;
@@ -138,6 +138,7 @@ public class BatchReceiver implements AutoCloseable {
       if (msg == null) {
         result = Message.Result.rejected(new BatchServiceException("Message reader returned no message"));
       } else {
+        msg.setRetryMetadata(Message.RetryMetadata.fromHeaders(delivery.getProperties().getHeaders()));
         result = processor.process(msg);
         if (result == null) {
           result = Message.Result.rejected(new BatchServiceException("Message processor returned no result"));
@@ -151,10 +152,13 @@ public class BatchReceiver implements AutoCloseable {
     try {
       switch (result.disposition()) {
         case ACK -> deliveryChannel.basicAck(deliveryTag, false);
-        case RETRY -> deliveryChannel.basicNack(deliveryTag, false, true);
+        case RETRY -> {
+          deliveryPublisher.retry(controller.queueName(), delivery, result.deferMs(), result.cause());
+          deliveryChannel.basicAck(deliveryTag, false);
+        }
         case REJECT -> {
           log.warn("Dead-lettering delivery [{}] from queue [{}]", deliveryTag, controller.queueName());
-          deadLetters.publish(controller.queueName(), delivery, result.cause());
+          deliveryPublisher.deadLetter(controller.queueName(), delivery, result.cause());
           deliveryChannel.basicAck(deliveryTag, false);
         }
       }
@@ -212,7 +216,7 @@ public class BatchReceiver implements AutoCloseable {
 
   @Override
   public synchronized void close() {
-    deadLetters.close();
+    deliveryPublisher.close();
     try {
       if (channel != null && channel.isOpen()) {
         channel.close();
@@ -228,8 +232,9 @@ public class BatchReceiver implements AutoCloseable {
     }
   }
 
-  public synchronized void open(Controller controller) {
+  public synchronized void open(Controller controller, BatchEmitter.ServiceEmitter emitter) {
     this.controller = controller;
+    deliveryPublisher.useEmitter(emitter);
     if (isOpen()) {
       return;
     }
@@ -239,7 +244,7 @@ public class BatchReceiver implements AutoCloseable {
       connection = rabbitMQClient.connect();
       channel = connection.createChannel();
       channel.basicQos(1);
-      channel.queueDeclare(controller.queueName(), true, false, false, null);
+      BatchQueues.declareWorkQueue(channel, controller.queueName());
       registerListeners();
     } catch (IOException e) {
       close();

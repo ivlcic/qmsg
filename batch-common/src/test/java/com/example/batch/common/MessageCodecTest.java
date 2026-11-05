@@ -68,4 +68,21 @@ class MessageCodecTest {
     assertThrows(Exception.class,
         () -> deserializer().deserialize("not-json".getBytes(StandardCharsets.UTF_8)));
   }
+
+  @Test
+  void retryMetadataIsTransportOnlyAndDoesNotChangeTheJsonEnvelope() throws Exception {
+    Message<String> message = new Message<>();
+    message.setId("msg-1");
+    message.setPayload("data");
+    message.setRetryMetadata(new Message.RetryMetadata(2, 20000, 15000));
+    String json = new String(serializer().serialize(message), StandardCharsets.UTF_8);
+    assertFalse(json.contains("retryMetadata"));
+    assertFalse(json.contains("retryCount"));
+    assertFalse(json.contains("totalDeferredMs"));
+    assertFalse(json.contains("lastDeferredMs"));
+    Message<Object> read = deserializer().deserialize(json.getBytes(StandardCharsets.UTF_8));
+    assertEquals(0, read.getRetryCount());
+    assertEquals(0, read.getTotalDeferredMs());
+    assertEquals(0, read.getLastDeferredMs());
+  }
 }

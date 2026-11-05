@@ -39,6 +39,7 @@ class AbstractBatchServiceExecuteTest {
 
     BatchStep.Result result = BatchStep.proceed();
     RuntimeException failure;
+    BatchContext<TestPayload> lastContext;
 
     @SuppressWarnings("unchecked")
     static List<String> trail(BatchContext<TestPayload> context) {
@@ -52,6 +53,7 @@ class AbstractBatchServiceExecuteTest {
 
     @Override
     public Result execute(BatchContext<TestPayload> context) {
+      lastContext = context;
       trail(context).add(getClass().getSimpleName());
       if (failure != null) {
         throw failure;
@@ -389,5 +391,20 @@ class AbstractBatchServiceExecuteTest {
     assertEquals(Message.Disposition.RETRY, result.disposition());
     assertEquals(7000, result.deferMs());
     assertSame(failure, result.cause());
+  }
+
+  @Test
+  void asyncExecutionPassesRetryAndDeferredMetadataToEveryStep() throws Exception {
+    Message<TestPayload> message = new Message<>();
+    message.setId("trace-1");
+    message.setPayload(new TestPayload("p"));
+    message.setRetryMetadata(new Message.RetryMetadata(2, 20000, 15000));
+    Message.Processor<Message<TestPayload>, TestPayload> processor = newService().getProcessor();
+    assertEquals(Message.Disposition.ACK, processor.process(message).disposition());
+    assertEquals(2, stepOne.lastContext.getRetryCount());
+    assertEquals(20000, stepOne.lastContext.getTotalDeferredMs());
+    assertEquals(15000, stepOne.lastContext.getLastDeferredMs());
+    assertSame(stepOne.lastContext, stepTwo.lastContext);
+    assertTrue(stepOne.lastContext.isAsync());
   }
 }

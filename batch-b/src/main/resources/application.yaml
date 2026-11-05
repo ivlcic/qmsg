@@ -1,3 +1,8 @@
+batch:
+  retry:
+    max-retries: 7
+    delays-ms: 5000,15000,45000,120000,300000,900000,3600000
+
 quarkus:
   http:
     port: 8081

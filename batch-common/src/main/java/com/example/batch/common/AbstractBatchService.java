@@ -259,7 +259,8 @@ public abstract class AbstractBatchService implements BatchService {
   protected <M extends Message<P>, P> Message.Processor<M, P> getProcessor() {
     return message -> {
       BatchStep.Result result = executeResult(
-          new BatchContext<>(message.getAction(), message.getId(), message.getPayload(), true)
+          new BatchContext<>(message.getAction(), message.getId(), message.getPayload(), true,
+              message.getRetryCount(), message.getTotalDeferredMs(), message.getLastDeferredMs())
       );
       return switch (result.getProcess()) {
         case CONTINUE, STOP -> Message.Result.acknowledged();
@@ -293,7 +294,7 @@ public abstract class AbstractBatchService implements BatchService {
     }
     BatchReceiver.Controller controller = new ReceiverRetryController();
     try {
-      receiver.open(controller);
+      receiver.open(controller, emitter);
       consumerTag = receiver.consume(getReader(), getProcessor());
       controller.retrySuccess();
       log.info("Started consuming queue [{}] with consumer tag [{}]", controller.queueName(), consumerTag);

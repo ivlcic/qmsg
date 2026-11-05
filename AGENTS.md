@@ -28,8 +28,9 @@ The framework is message-driven. Each batch service:
 ## Runtime Stack
 
 - Java `17`
-- Quarkus `3.35.4`
-- Quarkiverse RabbitMQ Client `3.3.0`
+- Quarkus `3.40.1.1`
+- Quarkiverse RabbitMQ Client `3.4.1`
+- RabbitMQ server `4.4+`, with quorum work queues for native scheduled delivery
 - JAX-RS with Jackson
 
 ## Code Organization
@@ -59,6 +60,7 @@ Behavior:
 - missing or blank action maps to the internal default key `<<default>>`
 - `payload` is the typed data passed to configured steps
 - `Message` also defines the functional interfaces used by the transport layer: `Reader`, `Processor`, `Writer`, `Serializer`, and `Deserializer`
+- Retry metadata is carried in AMQP headers and exposed through `Message.RetryMetadata`; it is excluded from the JSON envelope with `@JsonIgnore`
 
 ### Batch Service Contract
 
@@ -190,6 +192,11 @@ Carries:
 - typed payload
 - receive timestamp
 - per-message attribute map for step-to-step state sharing
+- `retryCount`: number of scheduled retries preceding this delivery; initial delivery is `0`
+- `totalDeferredMs`: sum of scheduled retry delays preceding this delivery
+- `lastDeferredMs`: the most recent scheduled retry delay
+
+All three retry fields default to zero for initial deliveries and synchronous calls. Their getters are `getRetryCount()`, `getTotalDeferredMs()`, and `getLastDeferredMs()`. Deferred times describe scheduled delays, excluding processing time and any additional work-queue backlog. Each step in the chain receives the same immutable retry metadata.
 
 ### RabbitMQ Receiver
 
@@ -197,19 +204,48 @@ Carries:
 
 Responsibilities:
 
-- owns RabbitMQ `Connection` and `Channel`
-- declares the queue
+- owns a separate consuming RabbitMQ `Connection` and `Channel`
+- declares the work queue as durable and quorum through `BatchQueues`, after checking for RabbitMQ `4.4+`
 - sets `basicQos(1)`
 - manages consumer registration and cancellation
 - reads raw deliveries through `Message.Reader`
 - processes messages through `Message.Processor`
 - handles `Message.Result` dispositions `ACK`, `RETRY`, and `REJECT`
-- performs `basicAck` on success and `basicNack(..., requeue=true)` only for explicit retries
-- forwards unreadable messages, unexpected processing exceptions, and rejected results through `BatchDeadLetterPublisher` to `queue.<Service>.dlq`
+- performs `basicAck` on success
+- republishes explicit retries to the same quorum queue with a future `x-opt-delivery-time` header through `BatchDeliveryPublisher`, then acknowledges the original only after confirmation
+- forwards unreadable messages, unexpected processing exceptions, rejected results, and exhausted retries through `BatchDeliveryPublisher` to `queue.<Service>.dlq`
 - preserves original message bytes and metadata, waits for a mandatory publish and publisher confirmation, and then acknowledges the original delivery
-- leaves the original unsettled and schedules recovery if DLQ forwarding fails
+- leaves the original unsettled and schedules recovery if retry or DLQ forwarding fails
+- validates retry metadata from AMQP headers and passes it through `Message` to `BatchContext`
 
-Existing work-queue declaration arguments are unchanged. Final DLQs are declared separately, avoiding an incompatible redeclaration of existing work queues.
+Existing classic work queues must be migrated or recreated before using this version: RabbitMQ cannot change an existing queue's type through `queueDeclare`. Both receivers and emitters declare work queues with `x-queue-type=quorum`. Final DLQs are declared separately as durable queues.
+
+### Scheduled Retries
+
+[BatchDeliveryPublisher.java](batch-common/src/main/java/com/example/batch/common/BatchDeliveryPublisher.java)
+[BatchRetryPolicy.java](batch-common/src/main/java/com/example/batch/common/BatchRetryPolicy.java)
+[BatchQueues.java](batch-common/src/main/java/com/example/batch/common/BatchQueues.java)
+
+No TTL queues, extra exchanges, or scheduling plugins are required. On retry, the publisher preserves the raw body and message/correlation IDs, increments the retry count, updates both deferred-time values, and sets `x-opt-delivery-time` to an absolute future Unix timestamp in milliseconds (an AMQP `long` / Java `Long`). Publishing is mandatory and persistent; the original is acknowledged only after a publisher confirmation and an unroutable-return check.
+
+Retry headers:
+
+- `x-batch-retry-count`
+- `x-batch-total-deferred-ms`
+- `x-batch-last-deferred-ms`
+
+The publisher removes inherited message expiration and validated publisher identity when republishing. Final-DLQ publication also removes `x-opt-delivery-time`, so rejected messages are immediately inspectable. Invalid retry headers and arithmetic overflow are permanent failures rather than retry-budget resets.
+
+Configuration, shown in both sample apps:
+
+```yaml
+batch:
+  retry:
+    max-retries: 7
+    delays-ms: 5000,15000,45000,120000,300000,900000,3600000
+```
+
+The limit counts retries after the initial delivery. Seven retries allow at most eight processing attempts along one retry chain. The configured delays are selected by retry number; if more retries are allowed than there are delays, the final delay is reused. A positive step `messageDeferMs` overrides the configured delay exactly; zero selects the configured delay. `max-retries: 0` sends any explicit retry directly to the final DLQ.
 
 ### RabbitMQ Emitter
 
@@ -218,6 +254,8 @@ Existing work-queue declaration arguments are unchanged. Final DLQs are declared
 Responsibilities:
 
 - creates a service-bound `ServiceEmitter` via `forService(serviceName)`
+- owns one lazily opened publishing connection per service, shared by normal emits and `BatchDeliveryPublisher`
+- uses separate channels for normal emits and retry/DLQ forwarding, with independent publishing locks and publisher confirms
 - derives the destination queue from that service name
 - declares the destination queue if needed
 - wraps payload data into the shared `Message<P>` envelope
@@ -225,6 +263,8 @@ Responsibilities:
 - delegates serialization to the `Message.Serializer` passed to `emit(...)`
 
 `AbstractBatchService` creates one service-bound emitter during post-construct initialization, matching the `BatchMetrics.forService(...)` style.
+
+The receiver binds its delivery publisher to that same emitter when opening. Stopping the receiver closes only its consumer connection and the delivery publisher's channel; normal emits remain available. Publishing channel failures recreate only the affected channel, while a closed publishing connection is replaced lazily. Application shutdown closes the service emitter and its shared publishing connection; a closed emitter cannot be reopened.
 
 ### Serialization
 
@@ -522,14 +562,15 @@ mvn -pl batch-b -am -Dmaven.repo.local=.m2/repository quarkus:dev
 
 Prerequisites:
 
-- RabbitMQ reachable at `localhost:5672`
+- RabbitMQ `4.4+` reachable at `localhost:5672`, with classic work queues migrated to quorum queues
 - Maven dependency download access
 
 ## Current Caveats
 
 - `BatchStatusResource` exposes status, healtz, and readyz only; concrete start/stop HTTP resources must extend or implement the control behavior explicitly.
 - The default async reader path depends on the current `DefaultDeserializer` implementation, so typed payload deserialization should be checked carefully when adding actions with different payload types.
-- Explicit `RETRY` outcomes still requeue immediately without an attempt limit. Delayed, bounded retry delivery is pending selection of the retry transport strategy; `messageDeferMs` is carried in the processor result but is not yet applied by the receiver.
+- Confirmed republishing followed by acknowledgement provides at-least-once delivery: a connection failure between those operations can duplicate a message. Steps with external side effects should be idempotent using the stable message/trace ID.
+- Scheduled delivery uses absolute timestamps, so application and broker clocks should be synchronized. Processing can occur later than the scheduled time because of broker load or work-queue backlog.
 
 ## Verification State
 
@@ -540,4 +581,18 @@ mvn -q -ntp -o -DskipTests compile
 mvn -q -ntp -o -Dquarkus.rabbitmqclient.devservices.enabled=false -Dmaven.test.redirectTestOutputToFile=true test
 ```
 
-Framework tests run with RabbitMQ Dev Services disabled. Delivery and publisher-confirm behavior is exercised with test doubles; a live-broker integration test has not been run. Omit `-o` when dependencies need downloading, and set `-Dmaven.repo.local=.m2/repository` when the home cache is not writable.
+Framework tests run with RabbitMQ Dev Services disabled. `BatchEmitterTest` checks shared connection ownership, channel isolation, reconnects, independent confirmation waits, and cleanup. An opt-in `BatchScheduledRetryIntegrationTest` has also been verified against an isolated RabbitMQ `4.4` broker. It checks native delayed delivery, ready messages overtaking delayed retries, raw-payload/ID preservation, retry metadata accumulation, final-DLQ forwarding, and normal emits remaining available after the delivery publisher closes.
+
+To include that test, point these properties at a test broker:
+
+```bash
+mvn -q -ntp -Dquarkus.rabbitmqclient.devservices.enabled=false \
+  -Dqmsg.rabbitmq.integration=true \
+  -Dquarkus.rabbitmqclient.hostname=localhost \
+  -Dquarkus.rabbitmqclient.port=5672 \
+  -Dquarkus.rabbitmqclient.username=guest \
+  -Dquarkus.rabbitmqclient.password=guest \
+  -Dmaven.test.redirectTestOutputToFile=true clean test
+```
+
+The integration test creates and removes its own UUID-named queues. Omit `-o` when dependencies need downloading, and set `-Dmaven.repo.local=.m2/repository` when the home cache is not writable.

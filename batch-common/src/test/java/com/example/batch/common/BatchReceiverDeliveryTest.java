@@ -15,29 +15,31 @@ import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class BatchReceiverDeliveryTest {
   private final List<String> events = new ArrayList<>();
   private final Message<Object> message = new Message<>();
-  private final Delivery delivery = new Delivery(
+  private Delivery delivery = new Delivery(
       new Envelope(7, false, "", "queue.TestService"),
       new AMQP.BasicProperties.Builder().correlationId("request-1").build(),
       "unreadable".getBytes(StandardCharsets.UTF_8)
   );
 
-  private class DeadLetters extends BatchDeadLetterPublisher {
+  private class DeadLetters extends BatchDeliveryPublisher {
     Delivery forwarded;
     Throwable cause;
     Exception failure;
+    long requestedDelayMs;
 
     @Override
     public synchronized void close() {
     }
 
     @Override
-    public synchronized void publish(String queue, Delivery incoming, Throwable error) throws Exception {
+    public synchronized void deadLetter(String queue, Delivery incoming, Throwable error) throws Exception {
       assertEquals("queue.TestService", queue);
       events.add("forward");
       if (failure != null) {
@@ -45,6 +47,18 @@ class BatchReceiverDeliveryTest {
       }
       forwarded = incoming;
       cause = error;
+    }
+
+    @Override
+    public synchronized void retry(String queue, Delivery incoming, long delayMs, Throwable error) throws Exception {
+      assertEquals("queue.TestService", queue);
+      events.add("retry");
+      if (failure != null) {
+        throw failure;
+      }
+      forwarded = incoming;
+      cause = error;
+      requestedDelayMs = delayMs;
     }
   }
 
@@ -79,7 +93,7 @@ class BatchReceiverDeliveryTest {
   @BeforeEach
   void setUp() throws Exception {
     channel = channel(events);
-    receiver.deadLetters = deadLetters;
+    receiver.deliveryPublisher = deadLetters;
     set(receiver, "channel", channel);
     set(receiver, "controller", new BatchReceiver.Controller() {
       public String queueName() { return "queue.TestService"; }
@@ -168,10 +182,45 @@ class BatchReceiverDeliveryTest {
   }
 
   @Test
-  void onlyExplicitRetryRequestsRedelivery() throws Exception {
+  void explicitRetryRepublishesBeforeAcknowledgingOriginal() throws Exception {
     deliver(body -> message, msg -> Message.Result.retry(5000, null));
-    assertEquals(List.of("nack:true"), events);
+    assertEquals(List.of("retry", "ack"), events);
+    assertSame(delivery, deadLetters.forwarded);
+    assertEquals(5000, deadLetters.requestedDelayMs);
+  }
+
+  @Test
+  void failedRetryPublishDoesNotSettleOriginalAndSchedulesRecovery() throws Exception {
+    deadLetters.failure = new IOException("broker unavailable");
+    deliver(body -> message, msg -> Message.Result.retry(5000, null));
+    assertEquals(List.of("retry", "recover"), events);
     assertNull(deadLetters.forwarded);
+  }
+
+  @Test
+  void processorReceivesAllRetryMetadataFromDeliveryHeaders() throws Exception {
+    delivery = new Delivery(delivery.getEnvelope(), new AMQP.BasicProperties.Builder().headers(Map.of(
+        Message.RetryMetadata.COUNT_HEADER, 2,
+        Message.RetryMetadata.TOTAL_DEFERRED_HEADER, 20000L,
+        Message.RetryMetadata.LAST_DEFERRED_HEADER, 15000L
+    )).build(), delivery.getBody());
+    deliver(body -> message, msg -> {
+      assertEquals(2, msg.getRetryCount());
+      assertEquals(20000, msg.getTotalDeferredMs());
+      assertEquals(15000, msg.getLastDeferredMs());
+      return Message.Result.acknowledged();
+    });
+    assertEquals(List.of("ack"), events);
+  }
+
+  @Test
+  void invalidRetryMetadataBypassesProcessorAndGoesToFinalDlq() throws Exception {
+    delivery = new Delivery(delivery.getEnvelope(), new AMQP.BasicProperties.Builder().headers(Map.of(
+        Message.RetryMetadata.COUNT_HEADER, -1
+    )).build(), delivery.getBody());
+    deliver(body -> message, msg -> { throw new AssertionError("must not process invalid metadata"); });
+    assertEquals(List.of("forward", "ack"), events);
+    assertInstanceOf(IllegalArgumentException.class, deadLetters.cause);
   }
 
   @Test

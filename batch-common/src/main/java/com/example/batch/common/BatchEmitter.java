@@ -27,8 +27,10 @@ public class BatchEmitter {
 
     private final String serviceName;
     private final RabbitMQClient rabbitMQClient;
+    private final Object connectionLock = new Object();
     private Connection connection;
     private Channel channel;
+    private boolean closed;
 
     private ServiceEmitter(String serviceName, RabbitMQClient rabbitMQClient) {
       if (serviceName == null || serviceName.isBlank()) {
@@ -52,34 +54,47 @@ public class BatchEmitter {
           .build();
     }
 
-    private synchronized void closeQuietly() {
+    private void closeChannel() {
       try {
-        if (channel != null && channel.isOpen()) {
+        if (channel != null) {
+          // Also unregister already-closed channels from automatic recovery.
           channel.close();
         }
       } catch (Exception e) {
         log.debug("Failed to close emitter channel for queue [{}]", queueName(), e);
       }
-      try {
-        if (connection != null && connection.isOpen()) {
-          connection.close();
-        }
-      } catch (Exception e) {
-        log.debug("Failed to close emitter connection for queue [{}]", queueName(), e);
-      }
       channel = null;
-      connection = null;
+    }
+
+    // Borrowers own their channels, but only this emitter owns the publishing connection.
+    // Do not hold the emit lock while creating a retry/DLQ channel.
+    Channel openChannel() throws IOException {
+      synchronized (connectionLock) {
+        if (closed) {
+          throw new IllegalStateException("Emitter is closed for queue " + queueName());
+        }
+        if (connection == null || !connection.isOpen()) {
+          if (connection != null) {
+            connection.abort();
+          }
+          connection = rabbitMQClient.connect();
+        }
+        Channel publisher = connection.createChannel();
+        if (publisher == null) {
+          throw new IOException("No publishing channel available for queue " + queueName());
+        }
+        return publisher;
+      }
     }
 
     private synchronized Channel channel() throws IOException {
-      if (connection != null && connection.isOpen() && channel != null && channel.isOpen()) {
+      if (channel != null && channel.isOpen()) {
         return channel;
       }
-      closeQuietly();
-      connection = rabbitMQClient.connect();
-      channel = connection.createChannel();
+      closeChannel();
+      channel = openChannel();
       channel.confirmSelect();
-      channel.queueDeclare(queueName(), true, false, false, null);
+      BatchQueues.declareWorkQueue(channel, queueName());
       return channel;
     }
 
@@ -108,19 +123,23 @@ public class BatchEmitter {
         publish(body);
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
-        closeQuietly();
+        closeChannel();
         throw new IllegalStateException("Interrupted while publishing to queue " + queueName(), e);
       } catch (Exception first) {
-        // The cached channel may be stale after a broker restart; reconnect and retry once.
-        log.warn("Publish to queue [{}] failed, reconnecting and retrying once", queueName(), first);
-        closeQuietly();
+        // Replace only this channel; a live connection can still serve retry/DLQ publishes.
+        log.warn("Publish to queue [{}] failed, reopening the channel and retrying once", queueName(), first);
+        closeChannel();
         try {
           publish(body);
         } catch (IOException e) {
-          closeQuietly();
+          closeChannel();
           throw new UncheckedIOException(e);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          closeChannel();
+          throw new IllegalStateException("Interrupted while publishing to queue " + queueName(), e);
         } catch (Exception e) {
-          closeQuietly();
+          closeChannel();
           throw new IllegalStateException("Failed to publish message to queue " + queueName(), e);
         }
       }
@@ -136,7 +155,19 @@ public class BatchEmitter {
 
     @Override
     public synchronized void close() {
-      closeQuietly();
+      closeChannel();
+      synchronized (connectionLock) {
+        closed = true;
+        try {
+          if (connection != null) {
+            connection.close();
+          }
+        } catch (Exception e) {
+          log.debug("Failed to close emitter connection for queue [{}]", queueName(), e);
+        } finally {
+          connection = null;
+        }
+      }
     }
   }
 
