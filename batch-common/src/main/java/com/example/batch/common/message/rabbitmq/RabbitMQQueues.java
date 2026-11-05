@@ -1,4 +1,4 @@
-package com.example.batch.common;
+package com.example.batch.common.message.rabbitmq;
 
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
@@ -8,10 +8,13 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-final class BatchQueues {
+/**
+ * @author Nikola Ivacic <nikola.ivacic@dropchop.com> on 05. 11. 2026.
+ */
+final class RabbitMQQueues {
   private static final Pattern VERSION = Pattern.compile("^(\\d+)\\.(\\d+)(?:\\.|$)");
 
-  private BatchQueues() {
+  private RabbitMQQueues() {
   }
 
   private static void requireScheduledDelivery(Connection connection) {

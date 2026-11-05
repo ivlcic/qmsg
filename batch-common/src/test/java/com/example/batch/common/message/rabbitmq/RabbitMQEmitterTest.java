@@ -1,5 +1,7 @@
-package com.example.batch.common;
+package com.example.batch.common.message.rabbitmq;
 
+import com.example.batch.common.RetryPolicy;
+import com.example.batch.common.message.Message;
 import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
@@ -21,7 +23,10 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class BatchEmitterTest {
+/**
+ * @author Nikola Ivacic <nikola.ivacic@dropchop.com> on 05. 11. 2026.
+ */
+class RabbitMQEmitterTest {
   @FunctionalInterface
   private interface Confirmation {
     void await() throws Exception;
@@ -96,15 +101,16 @@ class BatchEmitterTest {
   }
 
   private final List<PublishingConnection> connections = new CopyOnWriteArrayList<>();
-  private final BatchDeliveryPublisher publisher = new BatchDeliveryPublisher();
+  private final RabbitMQDeliveryApprover publisher = new RabbitMQDeliveryApprover();
+  private final RetryPolicy retryPolicy = new RetryPolicy(7, List.of(5000L));
   private final Delivery delivery = new Delivery(new Envelope(1, false, "", "queue.TestService"),
       new AMQP.BasicProperties.Builder().build(), new byte[]{1, 2, 3});
-  private BatchEmitter.ServiceEmitter emitter;
+  private RabbitMQEmitter emitter;
 
   @BeforeEach
   void setUp() {
-    BatchEmitter batchEmitter = new BatchEmitter();
-    batchEmitter.rabbitMQClient = (RabbitMQClient) Proxy.newProxyInstance(
+    RabbitMQEmitterProducer emitterProducer = new RabbitMQEmitterProducer();
+    emitterProducer.rabbitMQClient = (RabbitMQClient) Proxy.newProxyInstance(
         RabbitMQClient.class.getClassLoader(), new Class<?>[]{RabbitMQClient.class},
         (proxy, method, args) -> {
           if (method.getName().equals("connect")) {
@@ -114,8 +120,7 @@ class BatchEmitterTest {
           }
           throw new UnsupportedOperationException(method.getName());
         });
-    emitter = batchEmitter.forService("TestService");
-    publisher.retryPolicy = new BatchRetryPolicy(7, List.of(5000L));
+    emitter = emitterProducer.forService("TestService");
     publisher.useEmitter(emitter);
   }
 
@@ -124,7 +129,7 @@ class BatchEmitterTest {
   }
 
   private void retry() throws Exception {
-    publisher.retry("queue.TestService", delivery, 0, null);
+    publisher.retry("queue.TestService", delivery, retryPolicy, 0, null);
   }
 
   @AfterEach
@@ -160,8 +165,8 @@ class BatchEmitterTest {
     emit();
     retry();
     PublishingConnection connection = connections.get(0);
-    BatchReceiver receiver = new BatchReceiver();
-    receiver.deliveryPublisher = publisher;
+    RabbitMQReceiver receiver = new RabbitMQReceiver();
+    receiver.deliveryApprover = publisher;
     receiver.close();
     assertTrue(connection.open);
     assertTrue(connection.channels.get(0).open);
@@ -257,6 +262,7 @@ class BatchEmitterTest {
     assertTrue(connections.isEmpty());
   }
 
+  @SuppressWarnings("resource")
   @Test
   void retryCanPublishWhileNormalEmitIsWaitingForConfirmation() throws Exception {
     emit();

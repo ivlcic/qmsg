@@ -9,6 +9,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 
 import static com.example.batch.common.BatchService.byDefault;
 import static com.example.batch.common.BatchService.with;
+import static com.example.batch.common.BatchService.withRetryPolicy;
+import static java.time.Duration.*;
 
 /**
  * @author Nikola Ivačič <nikola.ivacic@dropchop.com> on 29. 06. 2026.
@@ -23,7 +25,13 @@ public class BatchBService extends AbstractBatchService {
                 .execute(
                     BatchBDefaultStep.class,
                     BatchBPublishStep.class
+                ),
+            withRetryPolicy()
+                .maxRetries(7)
+                .delays(
+                    ofSeconds(5), ofSeconds(15), ofSeconds(45), ofMinutes(2), ofMinutes(5), ofMinutes(15), ofHours(1)
                 )
+                .build()
         ).on(
             "archive",
             with(BatchBData1.class)

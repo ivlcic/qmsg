@@ -55,8 +55,16 @@ public interface BatchService {
     return new ActionBuilder<>(payloadType);
   }
 
+  static RetryPolicy.RetryPolicyBuilder withRetryPolicy() {
+    return RetryPolicy.builder();
+  }
+
+  static <P> Actions byDefault(ActionDefinition<P> definition, RetryPolicy retryPolicy) {
+    return new Actions().withRetryPolicy(retryPolicy).byDefault(definition);
+  }
+
   static <P> Actions byDefault(ActionDefinition<P> definition) {
-    return new Actions().byDefault(definition);
+    return byDefault(definition, RetryPolicy.DEFAULT);
   }
 
   @SuppressWarnings("unused")

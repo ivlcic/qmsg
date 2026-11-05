@@ -1,4 +1,4 @@
-package com.example.batch.common;
+package com.example.batch.common.message.rabbitmq;
 
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
@@ -10,7 +10,10 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class BatchQueuesTest {
+/**
+ * @author Nikola Ivacic <nikola.ivacic@dropchop.com> on 05. 11. 2026.
+ */
+class RabbitMQQueuesTest {
   private final AtomicReference<Object[]> declaration = new AtomicReference<>();
 
   private Channel channel(String version) {
@@ -36,7 +39,7 @@ class BatchQueuesTest {
 
   @Test
   void workQueuesAreDeclaredDurableAndQuorumOnSupportedBroker() throws Exception {
-    BatchQueues.declareWorkQueue(channel("4.4.0"), "queue.TestService");
+    RabbitMQQueues.declareWorkQueue(channel("4.4.0"), "queue.TestService");
     assertArrayEquals(new Object[]{"queue.TestService", true, false, false, Map.of("x-queue-type", "quorum")},
         declaration.get());
   }
@@ -44,7 +47,7 @@ class BatchQueuesTest {
   @Test
   void unsupportedOrUnknownBrokerVersionFailsBeforeDeclaration() {
     for (String version : new String[]{"3.13.7", "4.3.9", "unknown", null}) {
-      assertThrows(IllegalStateException.class, () -> BatchQueues.declareWorkQueue(channel(version), "queue.TestService"));
+      assertThrows(IllegalStateException.class, () -> RabbitMQQueues.declareWorkQueue(channel(version), "queue.TestService"));
       assertNull(declaration.get());
     }
   }

@@ -1,11 +1,13 @@
-package com.example.batch.common;
+package com.example.batch.common.message.rabbitmq;
 
+import com.example.batch.common.RetryPolicy;
+import com.example.batch.common.message.Message;
+import com.example.batch.common.message.rabbitmq.RabbitMQReceiver.RetryHeaders;
 import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Delivery;
 import com.rabbitmq.client.Return;
 import jakarta.enterprise.context.Dependent;
-import jakarta.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.HashMap;
@@ -13,15 +15,15 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 
+/**
+ * @author Nikola Ivacic <nikola.ivacic@dropchop.com> on 05. 11. 2026.
+ */
 @Slf4j
 @Dependent
-public class BatchDeliveryPublisher implements AutoCloseable {
+public class RabbitMQDeliveryApprover implements AutoCloseable {
   private static final long CONFIRM_TIMEOUT_MS = 30_000;
 
-  @Inject
-  BatchRetryPolicy retryPolicy;
-
-  private BatchEmitter.ServiceEmitter emitter;
+  private RabbitMQEmitter emitter;
   private Channel channel;
   private final AtomicReference<Return> returned = new AtomicReference<>();
 
@@ -37,7 +39,7 @@ public class BatchDeliveryPublisher implements AutoCloseable {
     channel = null;
   }
 
-  synchronized void useEmitter(BatchEmitter.ServiceEmitter emitter) {
+  synchronized void useEmitter(RabbitMQEmitter emitter) {
     Objects.requireNonNull(emitter, "Service emitter is required");
     if (this.emitter != emitter) {
       close();
@@ -80,9 +82,9 @@ public class BatchDeliveryPublisher implements AutoCloseable {
     try {
       Channel publisher = channel();
       if (workQueue) {
-        BatchQueues.declareWorkQueue(publisher, destination);
-        long delayMs = ((Number) headers.get(Message.RetryMetadata.LAST_DEFERRED_HEADER)).longValue();
-        headers.put(Message.DELIVERY_TIME_HEADER, Math.addExact(System.currentTimeMillis(), delayMs));
+        RabbitMQQueues.declareWorkQueue(publisher, destination);
+        long delayMs = ((Number) headers.get(RetryHeaders.LAST_DEFERRED_HEADER)).longValue();
+        headers.put(RetryHeaders.DELIVERY_TIME_HEADER, Math.addExact(System.currentTimeMillis(), delayMs));
       } else {
         publisher.queueDeclare(destination, true, false, false, null);
       }
@@ -107,14 +109,14 @@ public class BatchDeliveryPublisher implements AutoCloseable {
 
   public synchronized void deadLetter(String sourceQueue, Delivery delivery, Throwable cause) throws Exception {
     Map<String, Object> headers = headers(sourceQueue, delivery, cause);
-    headers.remove(Message.DELIVERY_TIME_HEADER);
+    headers.remove(RetryHeaders.DELIVERY_TIME_HEADER);
     publish(sourceQueue + ".dlq", delivery, headers, false);
   }
 
-  public synchronized void retry(String sourceQueue, Delivery delivery, long requestedDelayMs, Throwable cause)
-      throws Exception {
+  public synchronized void retry(String sourceQueue, Delivery delivery, RetryPolicy retryPolicy,
+                                 long requestedDelayMs, Throwable cause) throws Exception {
     try {
-      Message.RetryMetadata current = Message.RetryMetadata.fromHeaders(delivery.getProperties().getHeaders());
+      Message.RetryMetadata current = RetryHeaders.read(delivery.getProperties().getHeaders());
       if (current.retryCount() >= retryPolicy.getMaxRetries()) {
         log.warn("Retry limit [{}] reached for queue [{}]", retryPolicy.getMaxRetries(), sourceQueue);
         deadLetter(sourceQueue, delivery, cause);
@@ -123,7 +125,7 @@ public class BatchDeliveryPublisher implements AutoCloseable {
       long delayMs = retryPolicy.delayMs(Math.incrementExact(current.retryCount()), requestedDelayMs);
       Message.RetryMetadata next = current.next(delayMs);
       Map<String, Object> headers = headers(sourceQueue, delivery, cause);
-      next.writeHeaders(headers);
+      RetryHeaders.write(next, headers);
       publish(sourceQueue, delivery, headers, true);
       log.info("Scheduled retry [{}] for queue [{}] in [{}]ms; total deferred [{}]ms",
           next.retryCount(), sourceQueue, delayMs, next.totalDeferredMs());

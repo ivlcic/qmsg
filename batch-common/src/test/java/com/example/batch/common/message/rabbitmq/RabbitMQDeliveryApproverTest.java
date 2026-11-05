@@ -1,11 +1,9 @@
-package com.example.batch.common;
+package com.example.batch.common.message.rabbitmq;
 
-import com.rabbitmq.client.AMQP;
-import com.rabbitmq.client.Channel;
-import com.rabbitmq.client.Connection;
-import com.rabbitmq.client.Delivery;
-import com.rabbitmq.client.Envelope;
-import com.rabbitmq.client.Return;
+import com.example.batch.common.RetryPolicy;
+import com.example.batch.common.message.Message;
+import com.example.batch.common.message.rabbitmq.RabbitMQReceiver.RetryHeaders;
+import com.rabbitmq.client.*;
 import io.quarkiverse.rabbitmqclient.RabbitMQClient;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,10 +18,15 @@ import java.util.Map;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.example.batch.common.RetryPolicy.DEFAULT;
 import static org.junit.jupiter.api.Assertions.*;
 
-class BatchDeliveryPublisherTest {
-  private final BatchDeliveryPublisher publisher = new BatchDeliveryPublisher();
+/**
+ * @author Nikola Ivacic <nikola.ivacic@dropchop.com> on 05. 11. 2026.
+ */
+class RabbitMQDeliveryApproverTest {
+  private final RabbitMQDeliveryApprover publisher = new RabbitMQDeliveryApprover();
+  private final RetryPolicy retryPolicy = DEFAULT;
   private final List<String> events = new ArrayList<>();
   private final Delivery delivery = new Delivery(
       new Envelope(1, false, "", "queue.TestService"),
@@ -43,35 +46,30 @@ class BatchDeliveryPublisherTest {
   private boolean failConfirmation;
   private String destination = "queue.TestService.dlq";
   private String serverVersion = "4.4.0";
-  private BatchEmitter.ServiceEmitter emitter;
+  private RabbitMQEmitter emitter;
 
   @SuppressWarnings("unchecked")
   private AtomicReference<Return> returned() throws Exception {
-    Field field = BatchDeliveryPublisher.class.getDeclaredField("returned");
+    Field field = RabbitMQDeliveryApprover.class.getDeclaredField("returned");
     field.setAccessible(true);
     return (AtomicReference<Return>) field.get(publisher);
   }
 
   @BeforeEach
-  void setUp() throws Exception {
-    publisher.retryPolicy = new BatchRetryPolicy(7, List.of(5000L, 15000L, 45000L, 120000L, 300000L, 900000L, 3600000L));
+  void setUp() {
     AtomicReference<Channel> publishingChannel = new AtomicReference<>();
     Connection connection = (Connection) Proxy.newProxyInstance(
-        Connection.class.getClassLoader(), new Class<?>[]{Connection.class}, (proxy, method, args) -> {
-          if (method.getName().equals("isOpen")) {
-            return true;
-          }
-          if (method.getName().equals("close")) {
-            return null;
-          }
-          if (method.getName().equals("getServerProperties")) {
-            return Map.of("version", serverVersion);
-          }
-          if (method.getName().equals("createChannel")) {
-            return publishingChannel.get();
-          }
-          throw new UnsupportedOperationException(method.getName());
-        });
+        Connection.class.getClassLoader(),
+        new Class<?>[]{Connection.class},
+        (
+            proxy, method, args) -> switch (method.getName()) {
+              case "isOpen" -> true;
+              case "close" -> null;
+              case "getServerProperties" -> Map.of("version", serverVersion);
+              case "createChannel" -> publishingChannel.get();
+              default -> throw new UnsupportedOperationException(method.getName());
+            }
+        );
     Channel channel = (Channel) Proxy.newProxyInstance(
         Channel.class.getClassLoader(), new Class<?>[]{Channel.class}, (proxy, method, args) -> {
           switch (method.getName()) {
@@ -112,8 +110,8 @@ class BatchDeliveryPublisherTest {
           }
         });
     publishingChannel.set(channel);
-    BatchEmitter batchEmitter = new BatchEmitter();
-    batchEmitter.rabbitMQClient = (RabbitMQClient) Proxy.newProxyInstance(
+    RabbitMQEmitterProducer emitterProducer = new RabbitMQEmitterProducer();
+    emitterProducer.rabbitMQClient = (RabbitMQClient) Proxy.newProxyInstance(
         RabbitMQClient.class.getClassLoader(), new Class<?>[]{RabbitMQClient.class},
         (proxy, method, args) -> {
           if (method.getName().equals("connect")) {
@@ -121,7 +119,7 @@ class BatchDeliveryPublisherTest {
           }
           throw new UnsupportedOperationException(method.getName());
         });
-    emitter = batchEmitter.forService("TestService");
+    emitter = emitterProducer.forService("TestService");
     publisher.useEmitter(emitter);
   }
 
@@ -162,7 +160,7 @@ class BatchDeliveryPublisherTest {
 
   private Delivery withMetadata(Message.RetryMetadata metadata) {
     Map<String, Object> headers = new HashMap<>(delivery.getProperties().getHeaders());
-    metadata.writeHeaders(headers);
+    RetryHeaders.write(metadata, headers);
     return new Delivery(delivery.getEnvelope(), delivery.getProperties().builder().headers(headers).build(), delivery.getBody());
   }
 
@@ -170,13 +168,13 @@ class BatchDeliveryPublisherTest {
   void retrySchedulesOriginalBodyInSameQuorumQueueAndUpdatesAllMetadata() throws Exception {
     destination = "queue.TestService";
     long before = System.currentTimeMillis();
-    publisher.retry(destination, delivery, 0, new IllegalStateException("temporary"));
+    publisher.retry(destination, delivery, retryPolicy, 0, new IllegalStateException("temporary"));
     long after = System.currentTimeMillis();
     Map<String, Object> headers = publishedProperties.getHeaders();
-    long readyAt = assertInstanceOf(Long.class, headers.get(Message.DELIVERY_TIME_HEADER));
+    long readyAt = assertInstanceOf(Long.class, headers.get(RetryHeaders.DELIVERY_TIME_HEADER));
     assertTrue(readyAt >= before + 5000);
     assertTrue(readyAt <= after + 5000);
-    assertEquals(new Message.RetryMetadata(1, 5000, 5000), Message.RetryMetadata.fromHeaders(headers));
+    assertEquals(new Message.RetryMetadata(1, 5000, 5000), RetryHeaders.read(headers));
     assertSame(delivery.getBody(), publishedBody);
     assertEquals("message-1", publishedProperties.getMessageId());
     assertEquals("request-1", publishedProperties.getCorrelationId());
@@ -187,57 +185,57 @@ class BatchDeliveryPublisherTest {
   @Test
   void subsequentRetryAccumulatesDelayAndReplacesLastDelay() throws Exception {
     destination = "queue.TestService";
-    publisher.retry(destination, withMetadata(new Message.RetryMetadata(1, 5000, 5000)), 0, null);
+    publisher.retry(destination, withMetadata(new Message.RetryMetadata(1, 5000, 5000)), retryPolicy, 0, null);
     assertEquals(new Message.RetryMetadata(2, 20000, 15000),
-        Message.RetryMetadata.fromHeaders(publishedProperties.getHeaders()));
+        RetryHeaders.read(publishedProperties.getHeaders()));
   }
 
   @Test
   void explicitDelayOverridesDefaultSchedule() throws Exception {
     destination = "queue.TestService";
-    publisher.retry(destination, withMetadata(new Message.RetryMetadata(2, 20000, 15000)), 1234, null);
+    publisher.retry(destination, withMetadata(new Message.RetryMetadata(2, 20000, 15000)), retryPolicy, 1234, null);
     assertEquals(new Message.RetryMetadata(3, 21234, 1234),
-        Message.RetryMetadata.fromHeaders(publishedProperties.getHeaders()));
+        RetryHeaders.read(publishedProperties.getHeaders()));
   }
 
   @Test
   void exhaustedRetriesGoToFinalDlqWithoutSchedulingAnotherDelivery() throws Exception {
     Delivery exhausted = withMetadata(new Message.RetryMetadata(7, 4985000, 3600000));
-    publisher.retry("queue.TestService", exhausted, 0, null);
+    publisher.retry("queue.TestService", exhausted, retryPolicy, 0, null);
     assertEquals(new Message.RetryMetadata(7, 4985000, 3600000),
-        Message.RetryMetadata.fromHeaders(publishedProperties.getHeaders()));
-    assertFalse(publishedProperties.getHeaders().containsKey(Message.DELIVERY_TIME_HEADER));
+        RetryHeaders.read(publishedProperties.getHeaders()));
+    assertFalse(publishedProperties.getHeaders().containsKey(RetryHeaders.DELIVERY_TIME_HEADER));
     assertSame(delivery.getBody(), publishedBody);
   }
 
   @Test
   void finalDlqRemovesAnyPreviousDeliveryTime() throws Exception {
     Map<String, Object> headers = new HashMap<>(delivery.getProperties().getHeaders());
-    headers.put(Message.DELIVERY_TIME_HEADER, Long.MAX_VALUE);
+    headers.put(RetryHeaders.DELIVERY_TIME_HEADER, Long.MAX_VALUE);
     Delivery scheduled = new Delivery(delivery.getEnvelope(), delivery.getProperties().builder().headers(headers).build(), delivery.getBody());
     publisher.deadLetter("queue.TestService", scheduled, null);
-    assertFalse(publishedProperties.getHeaders().containsKey(Message.DELIVERY_TIME_HEADER));
+    assertFalse(publishedProperties.getHeaders().containsKey(RetryHeaders.DELIVERY_TIME_HEADER));
   }
 
   @Test
   void deferredTotalOverflowIsDeadLetteredInsteadOfRepeatedlyRetried() throws Exception {
-    publisher.retry("queue.TestService", withMetadata(new Message.RetryMetadata(1, Long.MAX_VALUE, 1)), 5000, null);
+    publisher.retry("queue.TestService", withMetadata(new Message.RetryMetadata(1, Long.MAX_VALUE, 1)), retryPolicy, 5000, null);
     assertEquals(ArithmeticException.class.getName(), publishedProperties.getHeaders().get("x-batch-failure-type"));
-    assertFalse(publishedProperties.getHeaders().containsKey(Message.DELIVERY_TIME_HEADER));
+    assertFalse(publishedProperties.getHeaders().containsKey(RetryHeaders.DELIVERY_TIME_HEADER));
   }
 
   @Test
   void retryConfirmationTimeoutPropagates() {
     destination = "queue.TestService";
     failConfirmation = true;
-    assertThrows(TimeoutException.class, () -> publisher.retry(destination, delivery, 5000, null));
+    assertThrows(TimeoutException.class, () -> publisher.retry(destination, delivery, retryPolicy, 5000, null));
   }
 
   @Test
   void unroutableRetryIsNotReportedAsSuccessful() {
     destination = "queue.TestService";
     returnMessage = true;
-    assertThrows(IllegalStateException.class, () -> publisher.retry(destination, delivery, 5000, null));
+    assertThrows(IllegalStateException.class, () -> publisher.retry(destination, delivery, retryPolicy, 5000, null));
   }
 
   @Test
@@ -245,8 +243,25 @@ class BatchDeliveryPublisherTest {
     destination = "queue.TestService";
     serverVersion = "4.3.9";
     IllegalStateException failure = assertThrows(IllegalStateException.class,
-        () -> publisher.retry(destination, delivery, 5000, null));
+        () -> publisher.retry(destination, delivery, retryPolicy, 5000, null));
     assertTrue(failure.getMessage().contains("RabbitMQ 4.4+"));
     assertNull(publishedBody);
+  }
+
+  @Test
+  void zeroRetriesInTheServicePolicyGoStraightToTheFinalDlq() throws Exception {
+    publisher.retry("queue.TestService", delivery, new RetryPolicy(0, List.of(100L)), 0, null);
+    assertFalse(publishedProperties.getHeaders().containsKey(RetryHeaders.DELIVERY_TIME_HEADER));
+    assertEquals(new Message.RetryMetadata(0, 0, 0),
+        RetryHeaders.read(publishedProperties.getHeaders()));
+  }
+
+  @Test
+  void fallbackDelayComesFromTheSuppliedServicePolicy() throws Exception {
+    destination = "queue.TestService";
+    publisher.retry(destination, withMetadata(new Message.RetryMetadata(1, 100, 100)),
+        new RetryPolicy(2, List.of(25L, 75L)), 0, null);
+    assertEquals(new Message.RetryMetadata(2, 175, 75),
+        RetryHeaders.read(publishedProperties.getHeaders()));
   }
 }

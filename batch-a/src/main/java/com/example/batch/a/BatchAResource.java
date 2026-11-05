@@ -1,7 +1,7 @@
 package com.example.batch.a;
 
 import com.example.batch.common.BatchStatusResource;
-import com.example.batch.common.Message;
+import com.example.batch.common.message.Message;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;

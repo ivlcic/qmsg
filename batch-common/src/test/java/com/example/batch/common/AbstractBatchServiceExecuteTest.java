@@ -1,5 +1,9 @@
 package com.example.batch.common;
 
+import com.example.batch.common.message.Emitter;
+import com.example.batch.common.message.EmitterProducer;
+import com.example.batch.common.message.Message;
+import com.example.batch.common.message.Receiver;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.enterprise.context.control.RequestContextController;
@@ -12,6 +16,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static com.example.batch.common.BatchService.*;
+import static java.time.Duration.ofMillis;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -37,7 +42,7 @@ class AbstractBatchServiceExecuteTest {
   abstract static class RecordingStep implements BatchStep<TestPayload> {
     static final String TRAIL = "trail";
 
-    BatchStep.Result result = BatchStep.proceed();
+    BatchResult result = BatchStep.proceed();
     RuntimeException failure;
     BatchContext<TestPayload> lastContext;
 
@@ -52,7 +57,7 @@ class AbstractBatchServiceExecuteTest {
     }
 
     @Override
-    public Result execute(BatchContext<TestPayload> context) {
+    public BatchResult execute(BatchContext<TestPayload> context) {
       lastContext = context;
       trail(context).add(getClass().getSimpleName());
       if (failure != null) {
@@ -73,6 +78,70 @@ class AbstractBatchServiceExecuteTest {
     TestService(Actions actions) {
       super(actions);
     }
+  }
+
+  @Vetoed
+  static class CapturingReceiver implements Receiver {
+    Controller controller;
+    boolean open;
+    boolean retrierShutdown;
+
+    @Override
+    public boolean isOpen() { return open; }
+
+    @Override
+    public void scheduleStartRetry() { }
+
+    @Override
+    public void cancelStartRetry() { }
+
+    @Override
+    public long retryDelaySeconds() { return 5; }
+
+    @Override
+    public void shutdownRetrier() { retrierShutdown = true; }
+
+    @Override
+    public void close() { open = false; }
+
+    @Override
+    public void open(Controller controller, Emitter emitter) {
+      this.controller = controller;
+      this.open = true;
+    }
+
+    @Override
+    public <M extends Message<P>, P> String consume(
+        Message.Reader<M, P> reader, Message.Processor<M, P> processor) {
+      return "test-consumer";
+    }
+
+    @Override
+    public void cancel(String consumerTag) { }
+  }
+
+  static class RecordingEmitter implements Emitter {
+    Message<?> message;
+    Message.Serializer serializer;
+    boolean closed;
+
+    @Override
+    public <P> void emit(Message<P> message, Message.Serializer serializer) {
+      this.message = message;
+      this.serializer = serializer;
+    }
+
+    @Override
+    public <P> Message<P> emit(String action, P payload, Message.Serializer serializer) {
+      Message<P> message = new Message<>();
+      message.setAction(action);
+      message.setPayload(payload);
+      emit(message, serializer);
+      return message;
+    }
+
+    @Override
+    public void close() { closed = true; }
   }
 
   static class CountingRequestContextController implements RequestContextController {
@@ -100,19 +169,23 @@ class AbstractBatchServiceExecuteTest {
   BatchMetrics batchMetrics;
 
   @Inject
-  BatchEmitter batchEmitter;
+  EmitterProducer emitterProducer;
 
   @Inject
   MeterRegistry registry;
 
-  private TestService newService(Actions actions) {
+  private TestService newService(Actions actions, EmitterProducer producer) {
     TestService service = new TestService(actions);
     service.batchMetrics = batchMetrics;
-    service.batchEmitter = batchEmitter;
+    service.emitterProducer = producer;
     service.requestContextController = contextController;
     service.availableSteps = List.of(stepOne, stepTwo, archiveStep);
     service.initializeSteps();
     return service;
+  }
+
+  private TestService newService(Actions actions) {
+    return newService(actions, emitterProducer);
   }
 
   private TestService newService() {
@@ -120,6 +193,87 @@ class AbstractBatchServiceExecuteTest {
         byDefault(with(TestPayload.class).execute(StepOne.class, StepTwo.class))
             .on("archive", with(TestPayload.class).execute(ArchiveStep.class))
     );
+  }
+
+  private RetryPolicy retryPolicy(TestService service) {
+    CapturingReceiver receiver = new CapturingReceiver();
+    service.receiver = receiver;
+    service.start();
+    service.getEmitter().close();
+    return receiver.controller.retryPolicy();
+  }
+
+  @Test
+  void lifecycleAndPublishingUseOnlyTransportInterfaces() throws Exception {
+    RecordingEmitter emitter = new RecordingEmitter();
+    EmitterProducer producer = serviceName -> {
+      assertEquals("TestService", serviceName);
+      return emitter;
+    };
+    TestService service = newService(byDefault(with(TestPayload.class).execute(StepOne.class)), producer);
+    CapturingReceiver receiver = new CapturingReceiver();
+    service.receiver = receiver;
+    assertSame(emitter, service.getEmitter());
+
+    service.start();
+    assertTrue(receiver.isOpen());
+    TestPayload payload = new TestPayload("example");
+    Message.Serializer serializer = message -> new byte[]{1, 2, 3};
+    Message<TestPayload> emitted = service.emit("archive", payload, serializer);
+    assertSame(emitted, emitter.message);
+    assertSame(serializer, emitter.serializer);
+    assertSame(payload, emitted.getPayload());
+    assertEquals("archive", emitted.getAction());
+
+    service.stop();
+    assertFalse(receiver.isOpen());
+    assertFalse(emitter.closed, "stopping the receiver must leave the emitter available");
+    service.emit(null, payload, serializer);
+    service.onApplicationShutdown(null);
+    assertTrue(receiver.retrierShutdown);
+    assertTrue(emitter.closed);
+  }
+
+  @Test
+  void controllerExposesThePolicySnapshotCreatedInTheServiceConstructor() {
+    RetryPolicy configured = RetryPolicy.builder().maxRetries(2).delays(ofMillis(100), ofMillis(300)).build();
+    Actions actions = byDefault(with(TestPayload.class).execute(StepOne.class), configured);
+    TestService service = newService(actions);
+    actions.withRetryPolicy(RetryPolicy.builder().maxRetries(0).build());
+    RetryPolicy policy = retryPolicy(service);
+    assertSame(configured, policy);
+    assertEquals(2, policy.getMaxRetries());
+    assertEquals(100, policy.delayMs(1, 0));
+    assertEquals(300, policy.delayMs(2, 0));
+    assertEquals(1234, policy.delayMs(2, 1234));
+  }
+
+  @Test
+  void retryPoliciesAreServiceSpecificRatherThanApplicationScoped() {
+    RetryPolicy first = retryPolicy(newService(byDefault(with(TestPayload.class).execute(StepOne.class),
+        RetryPolicy.builder().maxRetries(0).delays(ofMillis(100)).build())));
+    RetryPolicy second = retryPolicy(newService(byDefault(with(TestPayload.class).execute(StepOne.class),
+        RetryPolicy.builder().maxRetries(4).delays(ofMillis(500)).build())));
+    assertNotSame(first, second);
+    assertEquals(0, first.getMaxRetries());
+    assertEquals(4, second.getMaxRetries());
+    assertEquals(100, first.delayMs(1, 0));
+    assertEquals(500, second.delayMs(1, 0));
+  }
+
+  @Test
+  void nullRetryPolicyIsRejectedAtDefinitionTime() {
+    ActionDefinition<TestPayload> definition = with(TestPayload.class).execute(StepOne.class);
+    assertThrows(NullPointerException.class, () -> byDefault(definition, null));
+  }
+
+  @Test
+  void unchangedActionBuildersUseTheOriginalRetryDefaults() {
+    RetryPolicy policy = retryPolicy(newService());
+    assertSame(RetryPolicy.DEFAULT, policy);
+    assertEquals(7, policy.getMaxRetries());
+    assertEquals(5000, policy.delayMs(1, 0));
+    assertEquals(3600000, policy.delayMs(7, 0));
   }
 
   private double counter(String name, String action, String step) {
@@ -153,7 +307,7 @@ class AbstractBatchServiceExecuteTest {
         byDefault(with(TestPayload.class).execute(StepOne.class))
     );
     service.batchMetrics = batchMetrics;
-    service.batchEmitter = batchEmitter;
+    service.emitterProducer = emitterProducer;
     service.availableSteps = List.of(stepTwo);
     assertThrows(BatchServiceException.class, service::initializeSteps);
   }
@@ -355,7 +509,7 @@ class AbstractBatchServiceExecuteTest {
 
   @Test
   void invalidStepOutcomeFailsAndStopsChain() throws Exception {
-    stepOne.result = BatchStep.Result.builder().process(null).build();
+    stepOne.result = BatchResult.builder().process(null).build();
     TestService service = newService();
     BatchContext<TestPayload> context = new BatchContext<>(null, "t-1", new TestPayload("p"));
     assertFalse(service.execute(context));
@@ -386,7 +540,7 @@ class AbstractBatchServiceExecuteTest {
   @Test
   void asyncRetryPreservesRequestedDelayAndCause() throws Exception {
     RuntimeException failure = new IllegalStateException("temporarily unavailable");
-    stepOne.result = BatchStep.retryer("try later", failure).messageDeferMs(7000).build();
+    stepOne.result = BatchResult.retryer("try later", failure).messageDeferMs(7000).build();
     Message.Result result = process(newService());
     assertEquals(Message.Disposition.RETRY, result.disposition());
     assertEquals(7000, result.deferMs());

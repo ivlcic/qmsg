@@ -1,5 +1,6 @@
 package com.example.batch.common;
 
+import com.example.batch.common.message.Message;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;

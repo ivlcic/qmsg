@@ -22,6 +22,8 @@ The framework is message-driven. Each batch service:
 
 - [pom.xml](pom.xml): parent Maven reactor for all modules
 - [batch-common](batch-common): reusable batch framework
+- `com.example.batch.common.message`: message envelope and transport-neutral interfaces
+- `com.example.batch.common.message.rabbitmq`: RabbitMQ implementations and header/queue helpers
 - [batch-a](batch-a): first concrete batch service
 - [batch-b](batch-b): second concrete batch service
 
@@ -43,7 +45,7 @@ The framework is message-driven. Each batch service:
 
 ### Message Envelope
 
-[Message.java](batch-common/src/main/java/com/example/batch/common/Message.java)
+[Message.java](batch-common/src/main/java/com/example/batch/common/message/Message.java)
 
 ```json
 {
@@ -60,7 +62,8 @@ Behavior:
 - missing or blank action maps to the internal default key `<<default>>`
 - `payload` is the typed data passed to configured steps
 - `Message` also defines the functional interfaces used by the transport layer: `Reader`, `Processor`, `Writer`, `Serializer`, and `Deserializer`
-- Retry metadata is carried in AMQP headers and exposed through `Message.RetryMetadata`; it is excluded from the JSON envelope with `@JsonIgnore`
+- `Message.RetryMetadata` is an immutable, transport-neutral value container with validation and retry arithmetic; it is excluded from the JSON envelope with `@JsonIgnore`
+- AMQP header names, parsing, and writing belong to the package-private `RabbitMQReceiver.RetryHeaders` helper, also used by `RabbitMQDeliveryApprover`
 
 ### Batch Service Contract
 
@@ -111,6 +114,8 @@ public class ExampleBatchService extends AbstractBatchService {
 
 `Actions` is an ordered registry from action name to `Action`.
 
+It also holds a service-wide immutable `RetryPolicy`. The overloaded `BatchService.byDefault(ActionDefinition<P> definition, RetryPolicy retryPolicy)` registers the default action and sets its service-wide retry policy using the package-private `Actions.withRetryPolicy(...)` mutator. The existing action-definition overload uses `RetryPolicy.DEFAULT`: seven retries and delays of 5s, 15s, 45s, 120s, 300s, 900s, and 3600s.
+
 Each `Action` contains:
 
 - action name
@@ -147,6 +152,7 @@ Important implementation details:
 ### Batch Step
 
 [BatchStep.java](batch-common/src/main/java/com/example/batch/common/BatchStep.java)
+[BatchResult.java](batch-common/src/main/java/com/example/batch/common/BatchResult.java)
 
 Steps implement:
 
@@ -155,13 +161,14 @@ package com.example.batch.a.steps;
 
 import com.example.batch.a.BatchAData;
 import com.example.batch.common.BatchContext;
+import com.example.batch.common.BatchResult;
 import com.example.batch.common.BatchStep;
 
 import static com.example.batch.common.BatchStep.proceed;
 
 public class ExampleStep implements BatchStep<BatchAData> {
   @Override
-  public Result execute(BatchContext<BatchAData> context) throws Exception {
+  public BatchResult execute(BatchContext<BatchAData> context) throws Exception {
     BatchAData payload = context.getPayload();
     context.put("payloadId", payload.id());
     return proceed();
@@ -171,14 +178,16 @@ public class ExampleStep implements BatchStep<BatchAData> {
 
 Routing and ordering are intentionally external to step implementations. A step only operates on its typed `BatchContext`.
 
-Each step returns a Lombok-built `BatchStep.Result` with an explicit `Process`:
+Each step returns a standalone Lombok-built `BatchResult` with an explicit `BatchResult.Process`:
 
 - `CONTINUE`: run the next step; helpers `proceed(...)` and `proceeder(...)`
 - `STOP`: stop successfully and acknowledge; helpers `stop(...)` and `stopper(...)`
 - `RETRY`: stop and request redelivery; helpers `retry(...)` and `retryer(...)`
 - `FAIL`: stop permanently and send the message to the final DLQ; helpers `fail(...)` and `failer(...)`
 
-The noun-form helpers return a builder for customization before `.build()`. Logging helpers accept varargs and move a trailing `Throwable` into `cause`, removing it from `logArgs`. The cause is diagnostic only; it does not change the outcome. Failure logging defaults to `ERROR`.
+The built-result shortcuts `proceed(...)`, `stop(...)`, `retry(...)`, and `fail(...)` remain on `BatchStep`. They use static imports of `BatchResult`'s builder shortcuts: `proceeder(...)`, `stopper(...)`, `retryer(...)`, and `failer(...)`. These builder helpers now belong to `BatchResult` and return `BatchResult.BatchResultBuilder` for customization before `.build()`, so they can also be used independently of steps. For example, static-import `BatchResult.retryer` and call `retryer("Try later").messageDeferMs(5000).build()`.
+
+Logging helpers accept varargs and move a trailing `Throwable` into `cause`, removing it from `logArgs`. The cause is diagnostic only; it does not change the outcome. Failure logging defaults to `ERROR`.
 
 Unexpected step exceptions become `fail(...)` results and follow the same logging, error-metrics, and DLQ flow as explicit failures. Null or invalid step results and unknown actions also fail permanently. Synchronous `service.execute(...)` returns `true` for successful completion or `STOP`, and `false` for `FAIL` or `RETRY`.
 
@@ -198,22 +207,32 @@ Carries:
 
 All three retry fields default to zero for initial deliveries and synchronous calls. Their getters are `getRetryCount()`, `getTotalDeferredMs()`, and `getLastDeferredMs()`. Deferred times describe scheduled delays, excluding processing time and any additional work-queue backlog. Each step in the chain receives the same immutable retry metadata.
 
+### Transport Interfaces
+
+[EmitterProducer.java](batch-common/src/main/java/com/example/batch/common/message/EmitterProducer.java)
+[Emitter.java](batch-common/src/main/java/com/example/batch/common/message/Emitter.java)
+[Receiver.java](batch-common/src/main/java/com/example/batch/common/message/Receiver.java)
+
+`AbstractBatchService` injects `EmitterProducer` and `Receiver` and stores an `Emitter`, without depending on RabbitMQ implementation classes. `EmitterProducer.forService(...)` creates the service-bound emitter. `Emitter` exposes the existing emit methods and close; `Receiver` exposes consumption and lifecycle operations and owns the `Controller` callback interface. None of these interfaces exposes RabbitMQ client types.
+
 ### RabbitMQ Receiver
 
-[BatchReceiver.java](batch-common/src/main/java/com/example/batch/common/BatchReceiver.java)
+[RabbitMQReceiver.java](batch-common/src/main/java/com/example/batch/common/message/rabbitmq/RabbitMQReceiver.java)
+
+Implements `Receiver` as a dependent CDI bean.
 
 Responsibilities:
 
 - owns a separate consuming RabbitMQ `Connection` and `Channel`
-- declares the work queue as durable and quorum through `BatchQueues`, after checking for RabbitMQ `4.4+`
+- declares the work queue as durable and quorum through `RabbitMQQueues`, after checking for RabbitMQ `4.4+`
 - sets `basicQos(1)`
 - manages consumer registration and cancellation
 - reads raw deliveries through `Message.Reader`
 - processes messages through `Message.Processor`
 - handles `Message.Result` dispositions `ACK`, `RETRY`, and `REJECT`
 - performs `basicAck` on success
-- republishes explicit retries to the same quorum queue with a future `x-opt-delivery-time` header through `BatchDeliveryPublisher`, then acknowledges the original only after confirmation
-- forwards unreadable messages, unexpected processing exceptions, rejected results, and exhausted retries through `BatchDeliveryPublisher` to `queue.<Service>.dlq`
+- republishes explicit retries to the same quorum queue with a future `x-opt-delivery-time` header through `RabbitMQDeliveryApprover`, then acknowledges the original only after confirmation
+- forwards unreadable messages, unexpected processing exceptions, rejected results, and exhausted retries through `RabbitMQDeliveryApprover` to `queue.<Service>.dlq`
 - preserves original message bytes and metadata, waits for a mandatory publish and publisher confirmation, and then acknowledges the original delivery
 - leaves the original unsettled and schedules recovery if retry or DLQ forwarding fails
 - validates retry metadata from AMQP headers and passes it through `Message` to `BatchContext`
@@ -222,9 +241,9 @@ Existing classic work queues must be migrated or recreated before using this ver
 
 ### Scheduled Retries
 
-[BatchDeliveryPublisher.java](batch-common/src/main/java/com/example/batch/common/BatchDeliveryPublisher.java)
-[BatchRetryPolicy.java](batch-common/src/main/java/com/example/batch/common/BatchRetryPolicy.java)
-[BatchQueues.java](batch-common/src/main/java/com/example/batch/common/BatchQueues.java)
+[RabbitMQDeliveryApprover.java](batch-common/src/main/java/com/example/batch/common/message/rabbitmq/RabbitMQDeliveryApprover.java)
+[RetryPolicy.java](batch-common/src/main/java/com/example/batch/common/RetryPolicy.java)
+[RabbitMQQueues.java](batch-common/src/main/java/com/example/batch/common/message/rabbitmq/RabbitMQQueues.java)
 
 No TTL queues, extra exchanges, or scheduling plugins are required. On retry, the publisher preserves the raw body and message/correlation IDs, increments the retry count, updates both deferred-time values, and sets `x-opt-delivery-time` to an absolute future Unix timestamp in milliseconds (an AMQP `long` / Java `Long`). Publishing is mandatory and persistent; the original is acknowledged only after a publisher confirmation and an unroutable-return check.
 
@@ -234,27 +253,45 @@ Retry headers:
 - `x-batch-total-deferred-ms`
 - `x-batch-last-deferred-ms`
 
+`RabbitMQReceiver.RetryHeaders` owns these header constants, the scheduled-delivery header `x-opt-delivery-time`, and conversion between header maps and `Message.RetryMetadata`. Header handling is kept out of the message value container. Missing metadata defaults to zero, while malformed values remain permanent failures.
+
 The publisher removes inherited message expiration and validated publisher identity when republishing. Final-DLQ publication also removes `x-opt-delivery-time`, so rejected messages are immediately inspectable. Invalid retry headers and arithmetic overflow are permanent failures rather than retry-budget resets.
 
-Configuration, shown in both sample apps:
+Retry defaults are defined in the service builder, as shown in both sample apps, not application configuration:
 
-```yaml
-batch:
-  retry:
-    max-retries: 7
-    delays-ms: 5000,15000,45000,120000,300000,900000,3600000
+```java
+import static com.example.batch.common.RetryPolicy.retryPolicy;
+import static java.time.Duration.ofHours;
+import static java.time.Duration.ofMinutes;
+import static java.time.Duration.ofSeconds;
+
+super(
+    byDefault(
+        with(BatchAData.class).execute(BatchAReadPayloadStep.class, BatchACompleteStep.class),
+        retryPolicy()
+            .maxRetries(7)
+            .delays(ofSeconds(5), ofSeconds(15), ofSeconds(45),
+                ofMinutes(2), ofMinutes(5), ofMinutes(15), ofHours(1))
+            .build()
+    )
+);
 ```
 
-The limit counts retries after the initial delivery. Seven retries allow at most eight processing attempts along one retry chain. The configured delays are selected by retry number; if more retries are allowed than there are delays, the final delay is reused. A positive step `messageDeferMs` overrides the configured delay exactly; zero selects the configured delay. `max-retries: 0` sends any explicit retry directly to the final DLQ.
+`RetryPolicy` is a framework model in `com.example.batch.common`, not the transport package. Its Lombok builder names the retry limit and accepts human-readable `Duration` values through `delays(...)`, or a millisecond list through `delaysMs(...)`. Builder defaults match `RetryPolicy.DEFAULT`; either the limit or the delays can be overridden independently. Construction validates the policy and copies its schedule into an immutable list.
+
+`AbstractBatchService` captures the policy in its constructor. `Receiver.Controller.retryPolicy()` exposes that same immutable object to the receiver, which passes it to the delivery approver for each retry. There is no separate transport policy or CDI policy bean. Policies can be reused across services, and subsequent builder or `Actions` changes do not alter an existing service's policy.
+
+The limit counts retries after the initial delivery. Seven retries allow at most eight processing attempts along one retry chain. Default delays are selected by retry number; if more retries are allowed than there are delays, the final delay is reused. A positive step `messageDeferMs` overrides the default delay exactly; zero selects the service's default delay. A limit of zero sends any explicit retry directly to the final DLQ. Limits must be non-negative and the delay schedule must be non-empty and strictly positive.
 
 ### RabbitMQ Emitter
 
-[BatchEmitter.java](batch-common/src/main/java/com/example/batch/common/BatchEmitter.java)
+[RabbitMQEmitterProducer.java](batch-common/src/main/java/com/example/batch/common/message/rabbitmq/RabbitMQEmitterProducer.java)
+[RabbitMQEmitter.java](batch-common/src/main/java/com/example/batch/common/message/rabbitmq/RabbitMQEmitter.java)
 
 Responsibilities:
 
-- creates a service-bound `ServiceEmitter` via `forService(serviceName)`
-- owns one lazily opened publishing connection per service, shared by normal emits and `BatchDeliveryPublisher`
+- `RabbitMQEmitterProducer` implements `EmitterProducer` as an application-scoped CDI bean and creates a service-bound `RabbitMQEmitter` via `forService(serviceName)`
+- `RabbitMQEmitter` implements `Emitter` and owns one lazily opened publishing connection per service, shared by normal emits and `RabbitMQDeliveryApprover`
 - uses separate channels for normal emits and retry/DLQ forwarding, with independent publishing locks and publisher confirms
 - derives the destination queue from that service name
 - declares the destination queue if needed
@@ -264,7 +301,7 @@ Responsibilities:
 
 `AbstractBatchService` creates one service-bound emitter during post-construct initialization, matching the `BatchMetrics.forService(...)` style.
 
-The receiver binds its delivery publisher to that same emitter when opening. Stopping the receiver closes only its consumer connection and the delivery publisher's channel; normal emits remain available. Publishing channel failures recreate only the affected channel, while a closed publishing connection is replaced lazily. Application shutdown closes the service emitter and its shared publishing connection; a closed emitter cannot be reopened.
+The receiver binds its delivery approver to that same emitter when opening. The RabbitMQ implementation requires a matching `RabbitMQEmitter`; incompatible emitter implementations are rejected before opening resources. Stopping the receiver closes only its consumer connection and the delivery approver's channel; normal emits remain available. Publishing channel failures recreate only the affected channel, while a closed publishing connection is replaced lazily. Application shutdown closes the service emitter and its shared publishing connection; a closed emitter cannot be reopened.
 
 ### Serialization
 
@@ -581,7 +618,7 @@ mvn -q -ntp -o -DskipTests compile
 mvn -q -ntp -o -Dquarkus.rabbitmqclient.devservices.enabled=false -Dmaven.test.redirectTestOutputToFile=true test
 ```
 
-Framework tests run with RabbitMQ Dev Services disabled. `BatchEmitterTest` checks shared connection ownership, channel isolation, reconnects, independent confirmation waits, and cleanup. An opt-in `BatchScheduledRetryIntegrationTest` has also been verified against an isolated RabbitMQ `4.4` broker. It checks native delayed delivery, ready messages overtaking delayed retries, raw-payload/ID preservation, retry metadata accumulation, final-DLQ forwarding, and normal emits remaining available after the delivery publisher closes.
+Framework tests run with RabbitMQ Dev Services disabled. Service tests also exercise lifecycle and publishing with interface-only fakes. `RabbitMQEmitterTest` checks shared connection ownership, channel isolation, reconnects, independent confirmation waits, and cleanup. An opt-in `RabbitMQScheduledRetryIntegrationTest` checks native delayed delivery, ready messages overtaking delayed retries, raw-payload/ID preservation, retry metadata accumulation, final-DLQ forwarding, normal emits remaining available after the delivery approver closes, and real consumption through the transport interfaces against an isolated RabbitMQ `4.4` broker.
 
 To include that test, point these properties at a test broker:
 

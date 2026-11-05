@@ -2,6 +2,7 @@ package com.example.batch.b.steps.archive;
 
 import com.example.batch.b.BatchBData1;
 import com.example.batch.common.BatchContext;
+import com.example.batch.common.BatchResult;
 import com.example.batch.common.BatchStep;
 import jakarta.enterprise.context.Dependent;
 import lombok.extern.slf4j.Slf4j;
@@ -16,7 +17,7 @@ import static com.example.batch.common.BatchStep.proceed;
 public class BatchBArchiveStep implements BatchStep<BatchBData1> {
 
   @Override
-  public Result execute(BatchContext<BatchBData1> context) {
+  public BatchResult execute(BatchContext<BatchBData1> context) {
     log.info("BatchB archive payload id=[{}]", context.getPayload().id());
     return proceed();
   }

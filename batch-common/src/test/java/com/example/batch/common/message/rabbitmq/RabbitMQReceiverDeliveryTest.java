@@ -1,5 +1,11 @@
-package com.example.batch.common;
+package com.example.batch.common.message.rabbitmq;
 
+import com.example.batch.common.BatchServiceException;
+import com.example.batch.common.RetryPolicy;
+import com.example.batch.common.message.Emitter;
+import com.example.batch.common.message.Message;
+import com.example.batch.common.message.Receiver;
+import com.example.batch.common.message.rabbitmq.RabbitMQReceiver.RetryHeaders;
 import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Delivery;
@@ -19,16 +25,20 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class BatchReceiverDeliveryTest {
+/**
+ * @author Nikola Ivacic <nikola.ivacic@dropchop.com> on 05. 11. 2026.
+ */
+class RabbitMQReceiverDeliveryTest {
   private final List<String> events = new ArrayList<>();
   private final Message<Object> message = new Message<>();
+  private final RetryPolicy retryPolicy = new RetryPolicy(2, List.of(100L, 200L));
   private Delivery delivery = new Delivery(
       new Envelope(7, false, "", "queue.TestService"),
       new AMQP.BasicProperties.Builder().correlationId("request-1").build(),
       "unreadable".getBytes(StandardCharsets.UTF_8)
   );
 
-  private class DeadLetters extends BatchDeliveryPublisher {
+  private class DeadLetters extends RabbitMQDeliveryApprover {
     Delivery forwarded;
     Throwable cause;
     Exception failure;
@@ -50,8 +60,10 @@ class BatchReceiverDeliveryTest {
     }
 
     @Override
-    public synchronized void retry(String queue, Delivery incoming, long delayMs, Throwable error) throws Exception {
+    public synchronized void retry(String queue, Delivery incoming, RetryPolicy policy,
+                                   long delayMs, Throwable error) throws Exception {
       assertEquals("queue.TestService", queue);
+      assertSame(retryPolicy, policy, "retry policy must come from the receiver controller");
       events.add("retry");
       if (failure != null) {
         throw failure;
@@ -62,7 +74,7 @@ class BatchReceiverDeliveryTest {
     }
   }
 
-  private final BatchReceiver receiver = new BatchReceiver();
+  private final RabbitMQReceiver receiver = new RabbitMQReceiver();
   private final DeadLetters deadLetters = new DeadLetters();
   private Channel channel;
 
@@ -93,10 +105,11 @@ class BatchReceiverDeliveryTest {
   @BeforeEach
   void setUp() throws Exception {
     channel = channel(events);
-    receiver.deliveryPublisher = deadLetters;
+    receiver.deliveryApprover = deadLetters;
     set(receiver, "channel", channel);
-    set(receiver, "controller", new BatchReceiver.Controller() {
+    set(receiver, "controller", new Receiver.Controller() {
       public String queueName() { return "queue.TestService"; }
+      public RetryPolicy retryPolicy() { return retryPolicy; }
       public boolean isRetryForbidden() { return false; }
       public void clearConsumerTag() { }
       public void retryPending() { events.add("recover"); }
@@ -107,7 +120,7 @@ class BatchReceiverDeliveryTest {
 
   private void deliver(Message.Reader<Message<Object>, Object> reader,
                        Message.Processor<Message<Object>, Object> processor) throws Exception {
-    Method method = BatchReceiver.class.getDeclaredMethod(
+    Method method = RabbitMQReceiver.class.getDeclaredMethod(
         "handleDelivery", Channel.class, Delivery.class, Message.Reader.class, Message.Processor.class);
     method.setAccessible(true);
     method.invoke(receiver, channel, delivery, reader, processor);
@@ -116,6 +129,18 @@ class BatchReceiverDeliveryTest {
   @AfterEach
   void tearDown() {
     receiver.shutdownRetrier();
+  }
+
+  @Test
+  void refusesAnEmitterFromAnotherTransportBeforeOpeningAnything() {
+    Emitter emitter = (Emitter) Proxy.newProxyInstance(
+        Emitter.class.getClassLoader(), new Class<?>[]{Emitter.class}, (proxy, method, args) -> {
+          throw new AssertionError("incompatible emitter must not be used");
+        });
+    IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+        () -> receiver.open(null, emitter));
+    assertTrue(failure.getMessage().contains("RabbitMQ emitter"));
+    assertTrue(events.isEmpty());
   }
 
   @Test
@@ -200,9 +225,9 @@ class BatchReceiverDeliveryTest {
   @Test
   void processorReceivesAllRetryMetadataFromDeliveryHeaders() throws Exception {
     delivery = new Delivery(delivery.getEnvelope(), new AMQP.BasicProperties.Builder().headers(Map.of(
-        Message.RetryMetadata.COUNT_HEADER, 2,
-        Message.RetryMetadata.TOTAL_DEFERRED_HEADER, 20000L,
-        Message.RetryMetadata.LAST_DEFERRED_HEADER, 15000L
+        RetryHeaders.COUNT_HEADER, 2,
+        RetryHeaders.TOTAL_DEFERRED_HEADER, 20000L,
+        RetryHeaders.LAST_DEFERRED_HEADER, 15000L
     )).build(), delivery.getBody());
     deliver(body -> message, msg -> {
       assertEquals(2, msg.getRetryCount());
@@ -216,7 +241,7 @@ class BatchReceiverDeliveryTest {
   @Test
   void invalidRetryMetadataBypassesProcessorAndGoesToFinalDlq() throws Exception {
     delivery = new Delivery(delivery.getEnvelope(), new AMQP.BasicProperties.Builder().headers(Map.of(
-        Message.RetryMetadata.COUNT_HEADER, -1
+        RetryHeaders.COUNT_HEADER, -1
     )).build(), delivery.getBody());
     deliver(body -> message, msg -> { throw new AssertionError("must not process invalid metadata"); });
     assertEquals(List.of("forward", "ack"), events);

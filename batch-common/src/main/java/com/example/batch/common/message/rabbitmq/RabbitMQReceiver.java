@@ -1,5 +1,9 @@
-package com.example.batch.common;
+package com.example.batch.common.message.rabbitmq;
 
+import com.example.batch.common.BatchServiceException;
+import com.example.batch.common.message.Emitter;
+import com.example.batch.common.message.Message;
+import com.example.batch.common.message.Receiver;
 import com.rabbitmq.client.*;
 import io.quarkiverse.rabbitmqclient.RabbitMQClient;
 import jakarta.enterprise.context.Dependent;
@@ -8,6 +12,7 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -18,21 +23,46 @@ import java.util.concurrent.TimeUnit;
  */
 @Slf4j
 @Dependent
-public class BatchReceiver implements AutoCloseable {
+public class RabbitMQReceiver implements Receiver {
   private static final long START_RETRY_DELAY_SECONDS = 5;
 
-  public interface Controller {
-    String queueName();
+  static final class RetryHeaders {
+    static final String COUNT_HEADER = "x-batch-retry-count";
+    static final String TOTAL_DEFERRED_HEADER = "x-batch-total-deferred-ms";
+    static final String LAST_DEFERRED_HEADER = "x-batch-last-deferred-ms";
+    static final String DELIVERY_TIME_HEADER = "x-opt-delivery-time";
 
-    boolean isRetryForbidden();
+    private RetryHeaders() {
+    }
 
-    void clearConsumerTag();
+    private static long header(Map<String, Object> headers, String key) {
+      Object value = headers == null ? null : headers.get(key);
+      if (value == null) {
+        return 0;
+      }
+      if (!(value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long)) {
+        throw new IllegalArgumentException("Retry header [" + key + "] must be an integer");
+      }
+      long number = ((Number) value).longValue();
+      if (number < 0) {
+        throw new IllegalArgumentException("Retry header [" + key + "] must not be negative");
+      }
+      return number;
+    }
 
-    void retryPending();
+    static Message.RetryMetadata read(Map<String, Object> headers) {
+      return new Message.RetryMetadata(
+          Math.toIntExact(header(headers, COUNT_HEADER)),
+          header(headers, TOTAL_DEFERRED_HEADER),
+          header(headers, LAST_DEFERRED_HEADER)
+      );
+    }
 
-    void retrySuccess();
-
-    void attemptStart();
+    static void write(Message.RetryMetadata metadata, Map<String, Object> headers) {
+      headers.put(COUNT_HEADER, metadata.retryCount());
+      headers.put(TOTAL_DEFERRED_HEADER, metadata.totalDeferredMs());
+      headers.put(LAST_DEFERRED_HEADER, metadata.lastDeferredMs());
+    }
   }
 
   @Inject
@@ -40,7 +70,7 @@ public class BatchReceiver implements AutoCloseable {
   RabbitMQClient rabbitMQClient;
 
   @Inject
-  BatchDeliveryPublisher deliveryPublisher;
+  RabbitMQDeliveryApprover deliveryApprover;
 
   private Connection connection;
   private Channel channel;
@@ -138,7 +168,7 @@ public class BatchReceiver implements AutoCloseable {
       if (msg == null) {
         result = Message.Result.rejected(new BatchServiceException("Message reader returned no message"));
       } else {
-        msg.setRetryMetadata(Message.RetryMetadata.fromHeaders(delivery.getProperties().getHeaders()));
+        msg.setRetryMetadata(RetryHeaders.read(delivery.getProperties().getHeaders()));
         result = processor.process(msg);
         if (result == null) {
           result = Message.Result.rejected(new BatchServiceException("Message processor returned no result"));
@@ -153,12 +183,13 @@ public class BatchReceiver implements AutoCloseable {
       switch (result.disposition()) {
         case ACK -> deliveryChannel.basicAck(deliveryTag, false);
         case RETRY -> {
-          deliveryPublisher.retry(controller.queueName(), delivery, result.deferMs(), result.cause());
+          deliveryApprover.retry(controller.queueName(), delivery, controller.retryPolicy(),
+              result.deferMs(), result.cause());
           deliveryChannel.basicAck(deliveryTag, false);
         }
         case REJECT -> {
           log.warn("Dead-lettering delivery [{}] from queue [{}]", deliveryTag, controller.queueName());
-          deliveryPublisher.deadLetter(controller.queueName(), delivery, result.cause());
+          deliveryApprover.deadLetter(controller.queueName(), delivery, result.cause());
           deliveryChannel.basicAck(deliveryTag, false);
         }
       }
@@ -174,10 +205,12 @@ public class BatchReceiver implements AutoCloseable {
     }
   }
 
+  @Override
   public synchronized boolean isOpen() {
     return channel != null && channel.isOpen() && connection != null && connection.isOpen();
   }
 
+  @Override
   public synchronized void scheduleStartRetry() {
     if (controller.isRetryForbidden()) {
       return;
@@ -195,6 +228,7 @@ public class BatchReceiver implements AutoCloseable {
     retryTask = retryExecutor.schedule(this::retryStart, START_RETRY_DELAY_SECONDS, TimeUnit.SECONDS);
   }
 
+  @Override
   public synchronized void cancelStartRetry() {
     if (retryTask != null) {
       retryTask.cancel(false);
@@ -202,10 +236,12 @@ public class BatchReceiver implements AutoCloseable {
     }
   }
 
+  @Override
   public long retryDelaySeconds() {
     return START_RETRY_DELAY_SECONDS;
   }
 
+  @Override
   public synchronized void shutdownRetrier() {
     cancelStartRetry();
     if (retryExecutor != null) {
@@ -216,7 +252,7 @@ public class BatchReceiver implements AutoCloseable {
 
   @Override
   public synchronized void close() {
-    deliveryPublisher.close();
+    deliveryApprover.close();
     try {
       if (channel != null && channel.isOpen()) {
         channel.close();
@@ -232,9 +268,13 @@ public class BatchReceiver implements AutoCloseable {
     }
   }
 
-  public synchronized void open(Controller controller, BatchEmitter.ServiceEmitter emitter) {
+  @Override
+  public synchronized void open(Controller controller, Emitter emitter) {
+    if (!(emitter instanceof RabbitMQEmitter rabbitMQEmitter)) {
+      throw new IllegalArgumentException("RabbitMQ receiver requires a RabbitMQ emitter");
+    }
     this.controller = controller;
-    deliveryPublisher.useEmitter(emitter);
+    deliveryApprover.useEmitter(rabbitMQEmitter);
     if (isOpen()) {
       return;
     }
@@ -244,7 +284,7 @@ public class BatchReceiver implements AutoCloseable {
       connection = rabbitMQClient.connect();
       channel = connection.createChannel();
       channel.basicQos(1);
-      BatchQueues.declareWorkQueue(channel, controller.queueName());
+      RabbitMQQueues.declareWorkQueue(channel, controller.queueName());
       registerListeners();
     } catch (IOException e) {
       close();
@@ -255,6 +295,7 @@ public class BatchReceiver implements AutoCloseable {
     }
   }
 
+  @Override
   public synchronized <M extends Message<P>, P> String consume(
       Message.Reader<M, P> reader, Message.Processor<M, P> processor) {
     if (!isOpen()) {
@@ -282,6 +323,7 @@ public class BatchReceiver implements AutoCloseable {
     }
   }
 
+  @Override
   public synchronized void cancel(String consumerTag) {
     if (!isOpen() || consumerTag == null) {
       return;

@@ -1,5 +1,6 @@
 package com.example.batch.common;
 
+import com.example.batch.common.message.Message;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.nio.charset.StandardCharsets;

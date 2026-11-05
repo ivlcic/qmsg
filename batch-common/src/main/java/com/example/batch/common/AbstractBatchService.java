@@ -1,6 +1,10 @@
 package com.example.batch.common;
 
 import com.dropchop.recyclone.base.api.model.utils.Logging;
+import com.example.batch.common.message.Emitter;
+import com.example.batch.common.message.EmitterProducer;
+import com.example.batch.common.message.Message;
+import com.example.batch.common.message.Receiver;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.arc.All;
 import io.quarkus.runtime.ShutdownEvent;
@@ -26,7 +30,7 @@ import static java.util.Map.entry;
 @Slf4j
 public abstract class AbstractBatchService implements BatchService {
   @Inject
-  BatchReceiver receiver;
+  Receiver receiver;
 
   @Inject
   ObjectMapper objectMapper;
@@ -35,7 +39,7 @@ public abstract class AbstractBatchService implements BatchService {
   BatchMetrics batchMetrics;
 
   @Inject
-  BatchEmitter batchEmitter;
+  EmitterProducer emitterProducer;
 
   @Inject
   RequestContextController requestContextController;
@@ -47,15 +51,26 @@ public abstract class AbstractBatchService implements BatchService {
 
   private final AtomicReference<BatchServiceState> state = new AtomicReference<>(BatchServiceState.initializing);
   private final Actions actions;
+  private final RetryPolicy retryPolicy;
   private BatchMetrics.ServiceMetrics metrics;
-  private BatchEmitter.ServiceEmitter emitter;
+  private Emitter emitter;
   private volatile String consumerTag;
 
-  private class ReceiverRetryController implements BatchReceiver.Controller {
+  protected AbstractBatchService(Actions actions) {
+    this.actions = actions;
+    this.retryPolicy = actions.getRetryPolicy();
+  }
+
+  private class ReceiverRetryController implements Receiver.Controller {
 
     @Override
     public String queueName() {
       return "queue." + getName();
+    }
+
+    @Override
+    public RetryPolicy retryPolicy() {
+      return retryPolicy;
     }
 
     @Override
@@ -83,10 +98,6 @@ public abstract class AbstractBatchService implements BatchService {
     public void attemptStart() {
       AbstractBatchService.this.attemptStart();
     }
-  }
-
-  protected AbstractBatchService(Actions actions) {
-    this.actions = actions;
   }
 
   @Override
@@ -125,7 +136,7 @@ public abstract class AbstractBatchService implements BatchService {
   @PostConstruct
   void initializeSteps() {
     metrics = batchMetrics.forService(getName());
-    emitter = batchEmitter.forService(getName());
+    emitter = emitterProducer.forService(getName());
     for (Action<?> action : actions.values()) {
       initializeAction(action);
     }
@@ -140,11 +151,11 @@ public abstract class AbstractBatchService implements BatchService {
     return new DefaultSerializer(objectMapper);
   }
 
-  protected BatchEmitter.ServiceEmitter getEmitter() {
+  protected Emitter getEmitter() {
     return emitter;
   }
 
-  private void logResult(BatchStep.Result result) {
+  private void logResult(BatchResult result) {
     if (result.getLogMessage() == null || result.getLogMessage().isBlank()) {
       return;
     }
@@ -166,7 +177,7 @@ public abstract class AbstractBatchService implements BatchService {
     log.error(result.getLogMessage(), result.getLogArgs(), result.getCause());
   }
 
-  private <P> BatchStep.Result executeSteps(Action<P> action, String actionName, BatchContext<P> context) {
+  private <P> BatchResult executeSteps(Action<P> action, String actionName, BatchContext<P> context) {
     resetMdcValues(
         entry("traceId", context.getTraceId()),
         entry("action", actionName),
@@ -178,7 +189,7 @@ public abstract class AbstractBatchService implements BatchService {
         String stepName = action.getStepTypes().get(stepIndex).getSimpleName();
         resetMdcValue("step", stepName);
         try {
-          BatchStep.Result result;
+          BatchResult result;
           try {
             result = step.execute(context);
             if (result == null || result.getProcess() == null) {
@@ -188,14 +199,14 @@ public abstract class AbstractBatchService implements BatchService {
             result = fail("Batch step [{}] failed", stepName, e);
           }
           logResult(result);
-          if (result.getProcess() == BatchStep.Result.Process.FAIL ||
-              result.getProcess() == BatchStep.Result.Process.RETRY) {
+          if (result.getProcess() == BatchResult.Process.FAIL ||
+              result.getProcess() == BatchResult.Process.RETRY) {
             metrics.recordExecutionError(actionName);
             metrics.recordStepError(actionName, stepName);
             return result;
           }
           metrics.recordStep(actionName, stepName);
-          if (result.getProcess() == BatchStep.Result.Process.STOP) {
+          if (result.getProcess() == BatchResult.Process.STOP) {
             metrics.recordExecution(actionName);
             return result;
           }
@@ -211,7 +222,7 @@ public abstract class AbstractBatchService implements BatchService {
     }
   }
 
-  private <P> BatchStep.Result executeInRequestContext(Action<P> action, String actionName, BatchContext<P> context) {
+  private <P> BatchResult executeInRequestContext(Action<P> action, String actionName, BatchContext<P> context) {
     boolean activated = requestContextController.activate();
     try {
       return executeSteps(action, actionName, context);
@@ -222,9 +233,9 @@ public abstract class AbstractBatchService implements BatchService {
     }
   }
 
-  private <P> BatchStep.Result executeResult(BatchContext<P> context) {
+  private <P> BatchResult executeResult(BatchContext<P> context) {
     String actionName = context == null ? DEFAULT_ACTION : normalizeAction(context.getAction());
-    BatchStep.Result result;
+    BatchResult result;
     try {
       Action<?> targetAction = actions.get(actionName);
       if (context == null) {
@@ -258,7 +269,7 @@ public abstract class AbstractBatchService implements BatchService {
 
   protected <M extends Message<P>, P> Message.Processor<M, P> getProcessor() {
     return message -> {
-      BatchStep.Result result = executeResult(
+      BatchResult result = executeResult(
           new BatchContext<>(message.getAction(), message.getId(), message.getPayload(), true,
               message.getRetryCount(), message.getTotalDeferredMs(), message.getLastDeferredMs())
       );
@@ -292,7 +303,7 @@ public abstract class AbstractBatchService implements BatchService {
     if (state.get() == BatchServiceState.started && consumerTag != null && receiver.isOpen()) {
       return status();
     }
-    BatchReceiver.Controller controller = new ReceiverRetryController();
+    Receiver.Controller controller = new ReceiverRetryController();
     try {
       receiver.open(controller, emitter);
       consumerTag = receiver.consume(getReader(), getProcessor());
@@ -303,7 +314,7 @@ public abstract class AbstractBatchService implements BatchService {
       controller.retryPending();
       receiver.close();
       log.warn(
-          "Failed to start RabbitMQ consumer for queue [{}]; retrying in [{}] seconds",
+          "Failed to start consumer for queue [{}]; retrying in [{}] seconds",
           controller.queueName(), receiver.retryDelaySeconds(), e
       );
       receiver.scheduleStartRetry();
